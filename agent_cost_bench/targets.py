@@ -70,6 +70,8 @@ def _infer_cost_source(cli_path: str, pricing: dict[str, Any]) -> CostSource:
         return CostSource.ANTIGRAVITY_JSON
     if stem == "devin":
         return CostSource.DEVIN_EXPORT
+    if stem == "opencode":
+        return CostSource.OPENCODE_JSON
     # Generic per-token pricing (any CLI that reports token counts via regex).
     if pricing.get("usd_per_input_token") and pricing.get("usd_per_output_token"):
         return CostSource.TOKENS
