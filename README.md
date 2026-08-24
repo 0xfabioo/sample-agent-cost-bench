@@ -2,7 +2,7 @@
 
 **How much does the same model cost across different coding CLIs? Which model delivers the best quality for your actual codebase?** agent-cost-bench answers both questions in a single run.
 
-Bring any model, any CLI, and any use case — a real GitHub repo with your own verification tests — and agent-cost-bench will measure cost, quality, and latency side by side.
+Bring any model, any CLI, and any use case — a real GitHub repo with your own verification tests — and agent-cost-bench will measure cost, quality, and latency side by side. Checkout a video of how to run this repo [here.](https://www.youtube.com/watch?v=rFoeg-cXhWs)
 
 ## What you can do
 
