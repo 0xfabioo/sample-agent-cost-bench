@@ -2,7 +2,7 @@
 
 **How much does the same model cost across different coding CLIs? Which model delivers the best quality for your actual codebase?** agent-cost-bench answers both questions in a single run.
 
-Bring any model, any CLI, and any use case — a real GitHub repo with your own verification tests — and agent-cost-bench will measure cost, quality, and latency side by side. Checkout a video of how to run this repo [here.](https://www.youtube.com/watch?v=rFoeg-cXhWs)
+Bring any model, any CLI, and any use case — a real GitHub repo with your own verification tests — and agent-cost-bench will measure cost, quality, and latency side by side. Checkout a video of how to run this repo [here of how to compare development agents.](https://www.youtube.com/watch?v=rFoeg-cXhWs)
 
 ## What you can do
 
@@ -35,6 +35,7 @@ Cost is always reported two ways: USD and native units (credits / AI Credits / t
   since Finch on macOS can only mount volumes from the home directory.
 
 > **Cost warning:** Each CLI you benchmark requires your own active subscription or license (Kiro, Claude Code, GitHub Copilot, Cursor, OpenAI Codex, Devin, etc.). Running benchmarks consumes credits, tokens, or premium requests against your account. A full run across all tasks can use significant resources. Start with a small subset (`task_ids:`) to estimate cost before running the full suite.
+> **Note:** Checkout a video of how to run this repo [here of how to compare development agents.](https://www.youtube.com/watch?v=rFoeg-cXhWs)
 
 ## Install
 
