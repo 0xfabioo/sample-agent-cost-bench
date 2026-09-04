@@ -8,6 +8,7 @@ from agent_cost_bench.models import CostSource, Pricing, Target
 from agent_cost_bench.targets import make_cli_target
 from agent_cost_bench.usage import (
     compute_codex_cost,
+    parse_antigravity_usage,
     parse_claude_usage,
     parse_codex_usage,
     parse_copilot_usage,
@@ -61,29 +62,95 @@ def test_claude_json_total_cost_usd():
     assert abs(u.seconds - 4.2) < 1e-9
 
 
-def test_copilot_jsonl_premium_request_fallback():
+def _copilot_aiu_event(nano: int, *, dupe_paths: bool = True) -> dict:
+    """A `model.model_call_success` event carrying a turn's AIU cost. Real output
+    puts the same value at data.copilotUsage.total_nano_aiu AND
+    data.responseChunk.copilot_usage.total_nano_aiu — the parser must read it
+    once per event, not sum both."""
+    data: dict = {"copilotUsage": {"total_nano_aiu": nano}}
+    if dupe_paths:
+        data["responseChunk"] = {"copilot_usage": {"total_nano_aiu": nano}}
+    return {"type": "model.model_call_success", "data": data}
+
+
+def test_copilot_no_aiu_reports_no_cost():
+    """Without any AIU telemetry, cost is None. Copilot cost is AIU-only — a
+    streamed premiumRequests value is ignored entirely (not turned into cost,
+    not reported as premium_requests). Tokens/timing are still reported."""
     lines = [
         json.dumps({"type": "turn", "usage": {"input_tokens": 100, "output_tokens": 50}}),
         json.dumps({"type": "result", "premiumRequests": 0.33, "sessionDurationMs": 5000}),
     ]
-    u = parse_copilot_usage("\n".join(lines), "", Pricing(usd_per_premium_request=0.04))
-    assert abs(u.premium_requests - 0.33) < 1e-9
-    assert abs(u.cost_usd - 0.33 * 0.04) < 1e-9
+    u = parse_copilot_usage("\n".join(lines), "", Pricing())
+    assert u.cost_usd is None            # no misleading 0.33 * 0.04 fallback
+    assert u.premium_requests is None    # premiumRequests no longer scraped
     assert u.seconds == 5.0
     assert u.input_tokens == 100
 
 
-def test_copilot_session_state_aiu_overrides(tmp_path):
-    # Write a fake session-state events.jsonl with totalNanoAiu.
+def test_copilot_inline_aiu_single_turn():
+    """Newer CLIs stream per-turn total_nano_aiu in model.model_call_success.
+    2e9 nanoAIU = 2 AIU = $0.02."""
+    stdout = "\n".join([
+        json.dumps({"type": "turn", "usage": {"input_tokens": 100, "output_tokens": 50}}),
+        json.dumps(_copilot_aiu_event(2_000_000_000)),
+    ])
+    u = parse_copilot_usage(stdout, "", Pricing())
+    assert abs(u.cost_usd - 0.02) < 1e-9
+    assert abs(u.raw_credits - 2.0) < 1e-9
+
+
+def test_copilot_inline_aiu_summed_across_turns_once_per_event():
+    """Per-turn values are summed; the duplicate copilotUsage /
+    responseChunk.copilot_usage paths in ONE event are NOT double counted."""
+    stdout = "\n".join([
+        json.dumps(_copilot_aiu_event(30_241_625_000)),  # turn 0
+        json.dumps(_copilot_aiu_event(14_671_100_000)),  # turn 1
+        json.dumps(_copilot_aiu_event(10_931_250_000)),  # turn 2
+    ])
+    u = parse_copilot_usage(stdout, "", Pricing())
+    total_nano = 30_241_625_000 + 14_671_100_000 + 10_931_250_000
+    assert abs(u.raw_credits - total_nano / 1e9) < 1e-6
+    assert abs(u.cost_usd - (total_nano / 1e9) * 0.01) < 1e-9
+
+
+def test_copilot_inline_aiu_single_path_still_counted():
+    """An event that carries the value at only one of the two paths still counts."""
+    stdout = json.dumps(_copilot_aiu_event(5_000_000_000, dupe_paths=False))
+    u = parse_copilot_usage(stdout, "", Pricing())
+    assert abs(u.cost_usd - 0.05) < 1e-9
+    assert abs(u.raw_credits - 5.0) < 1e-9
+
+
+def test_copilot_inline_aiu_preferred_over_session_state(tmp_path):
+    """When both inline AIU and a session-state record exist, the inline stream
+    (authoritative billed cost for this run) wins."""
+    session_id = "sess-123"
+    ev_dir = tmp_path / ".copilot" / "session-state" / session_id
+    ev_dir.mkdir(parents=True)
+    (ev_dir / "events.jsonl").write_text(
+        json.dumps({"type": "session.shutdown", "data": {"totalNanoAiu": 999_000_000_000}}) + "\n"
+    )
+    stdout = "\n".join([
+        json.dumps(_copilot_aiu_event(3_000_000_000)),
+        json.dumps({"type": "result", "sessionId": session_id}),
+    ])
+    u = parse_copilot_usage(stdout, "", Pricing(), home=tmp_path)
+    assert abs(u.cost_usd - 0.03) < 1e-9  # inline 3 AIU, not the 999 AIU session record
+
+
+def test_copilot_session_state_aiu_used_when_no_inline(tmp_path):
+    """Older CLIs with no inline AIU fall back to the session-state record,
+    located via the result event's sessionId."""
     session_id = "sess-123"
     ev_dir = tmp_path / ".copilot" / "session-state" / session_id
     ev_dir.mkdir(parents=True)
     (ev_dir / "events.jsonl").write_text(
         json.dumps({"type": "session.shutdown", "data": {"totalNanoAiu": 2_000_000_000}}) + "\n"
     )
-    stdout = json.dumps({"type": "result", "sessionId": session_id, "premiumRequests": 0.33})
-    u = parse_copilot_usage(stdout, "", Pricing(usd_per_premium_request=0.04), home=tmp_path)
-    # 2e9 nanoAIU = 2 AIU = $0.02, more accurate than premiumRequests * price.
+    stdout = json.dumps({"type": "result", "sessionId": session_id})
+    u = parse_copilot_usage(stdout, "", Pricing(), home=tmp_path)
+    # 2e9 nanoAIU = 2 AIU = $0.02.
     assert abs(u.cost_usd - 0.02) < 1e-9
     assert abs(u.raw_credits - 2.0) < 1e-9
 
@@ -647,4 +714,113 @@ def test_devin_dispatch_via_parse_usage(tmp_path):
     assert u.cached_input_tokens == 3000
     assert u.output_tokens == 500
     expected = 5000 * 0.000005 + 3000 * 0.0000005 + 500 * 0.000025
+    assert abs(u.cost_usd - expected) < 1e-12
+
+
+# ---------------------------------------------------------------------------
+# antigravity_json cost source (`agy -p "..." --output-format json`)
+# ---------------------------------------------------------------------------
+
+
+# Example per-token rates (divide a published per-1M rate by 1,000,000).
+_AGY_PRICING = dict(
+    usd_per_input_token=0.00000125,        # $1.25  / 1M (fresh input)
+    usd_per_cached_input_token=0.0000003125,  # $0.3125 / 1M (cache read)
+    usd_per_output_token=0.00001,          # $10.00 / 1M
+)
+
+
+def _agy_result(**usage_fields) -> str:
+    """Serialize a single `agy --output-format json` result object."""
+    obj = {
+        "conversation_id": "978c29ed-26db-46fd-ac6e-3c2be0438f3e",
+        "status": "SUCCESS",
+        "response": "some answer",
+        "duration_seconds": 5.909435,
+        "num_turns": 1,
+        "usage": usage_fields,
+    }
+    return json.dumps(obj)
+
+
+def test_antigravity_cost():
+    """cost = input × p_in + cache_read × p_cached + output × p_out.
+    thinking_tokens is a SUBSET of output_tokens — not billed separately.
+    """
+    stdout = _agy_result(
+        input_tokens=5563, output_tokens=1250,
+        thinking_tokens=611, cache_read_tokens=8130, total_tokens=6813,
+    )
+    u = parse_antigravity_usage(stdout, "", Pricing(**_AGY_PRICING))
+    # Total input processed = fresh input + cache reads.
+    assert u.input_tokens == 5563 + 8130
+    assert u.cached_input_tokens == 8130
+    assert u.output_tokens == 1250
+    assert u.reasoning_output_tokens == 611  # informational only
+    assert abs(u.seconds - 5.909435) < 1e-9
+    expected = 5563 * 0.00000125 + 8130 * 0.0000003125 + 1250 * 0.00001
+    assert abs(u.cost_usd - expected) < 1e-12
+
+
+def test_antigravity_no_cached_rate_falls_back_to_input_rate():
+    """Without usd_per_cached_input_token, cache reads bill at the input rate."""
+    stdout = _agy_result(
+        input_tokens=1000, output_tokens=200,
+        thinking_tokens=0, cache_read_tokens=500, total_tokens=1700,
+    )
+    pricing = Pricing(usd_per_input_token=0.00000125, usd_per_output_token=0.00001)
+    u = parse_antigravity_usage(stdout, "", pricing)
+    expected = 1000 * 0.00000125 + 500 * 0.00000125 + 200 * 0.00001
+    assert abs(u.cost_usd - expected) < 1e-12
+
+
+def test_antigravity_thinking_tokens_not_double_billed():
+    """thinking_tokens live inside output_tokens; cost ignores them."""
+    stdout = _agy_result(
+        input_tokens=1000, output_tokens=800,
+        thinking_tokens=600, cache_read_tokens=0, total_tokens=1800,
+    )
+    u = parse_antigravity_usage(stdout, "", Pricing(**_AGY_PRICING))
+    expected = 1000 * 0.00000125 + 800 * 0.00001
+    assert abs(u.cost_usd - expected) < 1e-12
+    assert u.reasoning_output_tokens == 600  # still captured for reporting
+
+
+def test_antigravity_no_pricing_returns_tokens_only():
+    """Without pricing rates, token counts are still reported (cost_usd=None)."""
+    stdout = _agy_result(
+        input_tokens=1000, output_tokens=200,
+        thinking_tokens=50, cache_read_tokens=300, total_tokens=1500,
+    )
+    u = parse_antigravity_usage(stdout, "", Pricing())
+    assert u.input_tokens == 1300
+    assert u.cached_input_tokens == 300
+    assert u.output_tokens == 200
+    assert u.cost_usd is None
+
+
+def test_antigravity_empty_output_returns_empty_usage():
+    u = parse_antigravity_usage("", "", Pricing(**_AGY_PRICING))
+    assert u.cost_usd is None
+    assert u.input_tokens is None
+
+
+def test_antigravity_dispatch_via_parse_usage():
+    """parse_usage routes CostSource.ANTIGRAVITY_JSON (inferred from `agy`)."""
+    stdout = _agy_result(
+        input_tokens=2000, output_tokens=300,
+        thinking_tokens=100, cache_read_tokens=1000, total_tokens=3300,
+    )
+    t = make_cli_target({
+        "name": "antigravity",
+        "cli_path": "agy",
+        "model_id": "default",
+        "pricing": _AGY_PRICING,
+    })
+    assert t.cost_source == CostSource.ANTIGRAVITY_JSON  # inferred from cli_path
+    u = parse_usage(t, stdout, "")
+    assert u.input_tokens == 2000 + 1000
+    assert u.cached_input_tokens == 1000
+    assert u.output_tokens == 300
+    expected = 2000 * 0.00000125 + 1000 * 0.0000003125 + 300 * 0.00001
     assert abs(u.cost_usd - expected) < 1e-12

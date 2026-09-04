@@ -13,6 +13,7 @@ outcomes without a real CLI / network:
   MOCK_CREDITS     Kiro credits to report           (default: 0.05)
   MOCK_TIME_S      seconds to report                (default: 2)
   MOCK_USD         claude total_cost_usd            (default: 0.01)
+  MOCK_NANO_AIU    copilot inline AIU (nano-AIU)    (default: 2000000000; 0 = none)
   MOCK_WRITE_FILE  filename to create in cwd        (default: solution.py)
   MOCK_FILE_BODY   contents of that file            (default: a passing marker)
   MOCK_EXIT        process exit code                (default: 0)
@@ -87,10 +88,18 @@ def main() -> int:
             print(json.dumps(obj))
         elif cost_mode == "copilot":
             time_s = float(os.environ.get("MOCK_TIME_S", "2"))
+            # Newer Copilot CLIs stream per-turn AIU cost inline. MOCK_NANO_AIU
+            # (nano-AIU) drives the real cost; set to "0" to simulate an older
+            # CLI that only writes a session-state record.
+            nano_aiu = int(os.environ.get("MOCK_NANO_AIU", "2000000000"))
+            if nano_aiu > 0:
+                print(json.dumps({
+                    "type": "model.model_call_success",
+                    "data": {"copilotUsage": {"total_nano_aiu": nano_aiu}},
+                }))
             obj = {
                 "type": "result",
                 "sessionId": os.environ.get("MOCK_SESSION_ID", "mock-session"),
-                "premiumRequests": float(os.environ.get("MOCK_PREMIUM", "0.33")),
                 "sessionDurationMs": int(time_s * 1000),
                 "usage": {"input_tokens": 1000, "output_tokens": 200},
             }

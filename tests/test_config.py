@@ -214,6 +214,11 @@ def test_cost_source_inferred_from_binary_name(tmp_path, monkeypatch):
         ("codex",         {},                                   CostSource.CODEX_JSON),
         ("cursor",        {},                                   CostSource.CURSOR_JSON),
         ("cursor-agent",  {},                                   CostSource.CURSOR_JSON),
+        ("agy",           {},                                   CostSource.ANTIGRAVITY_JSON),
+        ("antigravity",   {},                                   CostSource.ANTIGRAVITY_JSON),
+        # antigravity wins over the generic per-token rule despite having rates
+        ("agy",           {"usd_per_input_token": 0.000001,
+                           "usd_per_output_token": 0.000004},  CostSource.ANTIGRAVITY_JSON),
         # devin wins over the generic per-token rule below despite having rates
         ("devin",         {"usd_per_input_token": 0.000005,
                            "usd_per_output_token": 0.000025},  CostSource.DEVIN_EXPORT),
