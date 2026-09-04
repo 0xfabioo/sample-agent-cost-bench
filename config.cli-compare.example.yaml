@@ -11,6 +11,7 @@
 #   cursor login  (or agent login)   # Cursor (stores token in macOS Keychain;
 #                                    #   CURSOR_API_KEY env var alone is NOT sufficient)
 #   codex auth login                 # Codex (or export OPENAI_API_KEY)
+#   agy login                        # Antigravity
 #   devin auth login                 # Devin
 #
 # The harness inherits the parent shell's environment, so all CLIs pick up
@@ -41,10 +42,11 @@
 #   copilot          → copilot_json
 #   codex            → codex_json
 #   cursor           → cursor_json
+#   agy / antigravity → antigravity_json
 #   devin            → devin_export
 # You can still set it explicitly if needed, but in most cases it's not required.
 
-comparison_label: Opus 4.8 (Kiro / Claude Code / Copilot / Cursor / Devin)
+comparison_label: Opus 4.8 (Kiro / Claude Code / Copilot / Cursor / Devin ) vs Gemini 3.8 Flash in Antigravity)
 
 # LLM-as-judge for rubric tasks (optional — only needed if task_ids includes
 # rubric tasks like bedrock-sentiment that have quality.rubric).
@@ -74,12 +76,13 @@ runners:
                     "--effort", "{effort}"]
 
   # ── GitHub Copilot (claude-opus-4.8) ──────────────────────────────────────
+  # No pricing config needed: cost comes from Copilot's AI-credit (AIU)
+  # telemetry (1 AIU = $0.01), read from the JSON output. When no AIU data is
+  # present, cost is reported as unknown rather than guessed.
   - name: copilot
     display_name: "GitHub Copilot (claude-opus-4.8)"
     cli_path: copilot
     model_id: claude-opus-4.8
-    pricing:
-      usd_per_premium_request: 0.04   # fallback if session-state AIU unavailable
     cli_base_args: ["-p", "{prompt}", "--model", "{model}",
                     "--allow-all-tools", "--output-format", "json",
                     "--effort", "{effort}"]
@@ -119,6 +122,74 @@ runners:
       requires_pty: true
     cli_base_args: ["-p", "{prompt}", "--trust","--yolo", "--output-format", "json",
                     "--model", "{model}"]
+
+  # ── Antigravity (gemini) ──────────────────────────────────────────────────
+  # `agy -p "<prompt>" --output-format json` prints a single JSON result object
+  # with a `usage` block: input_tokens, output_tokens, thinking_tokens,
+  # cache_read_tokens, total_tokens — plus a top-level duration_seconds.
+  #
+  # Token semantics (priced like Cursor/Codex):
+  #   input_tokens      → fresh (non-cached) input, billed at usd_per_input_token
+  #   cache_read_tokens → cached input, billed at usd_per_cached_input_token
+  #   output_tokens     → billed at usd_per_output_token
+  #   thinking_tokens   → reasoning; a SUBSET of output_tokens, NOT billed extra
+  #
+  # cost = input_tokens × in_rate + cache_read_tokens × cached_rate
+  #      + output_tokens × out_rate
+  #
+  # Effort: like Cursor and Devin, Antigravity bakes the reasoning effort into
+  # the model slug rather than taking a separate --effort flag. `agy models`
+  # lists ids such as:
+  #   gemini-3.8-flash-high / -medium / -low
+  #   gemini-3.1-pro-high   / -low
+  #   gpt-oss-120b-medium
+  # So DON'T pass --effort here. Instead either:
+  #   (a) set model_id to a full slug that already carries the effort
+  #       (e.g. "gemini-3.8-flash-high"), or
+  #   (b) set model_id to the base slug ("gemini-3.8-flash") and let the harness
+  #       append the task's effort ("-high"/"-medium"/"-low") automatically — the
+  #       same mechanism used for Cursor/Devin, which keeps a cross-CLI run fair.
+  #
+  # Other flags (from `agy --help`):
+  #   --model <id>       model for the session; the harness substitutes {model}.
+  #   --agent <name>     optional agent for the session (`agy agents` to list).
+  #   --dangerously-skip-permissions  auto-approve tool calls so the coding task
+  #                      isn't blocked waiting on an approval prompt in print mode.
+  #
+  # Pricing: Gemini 3.8 Flash introductory rates from Google's announcement
+  # (https://blog.google/innovation-and-ai/models-and-research/gemini-models/3-8-flash-and-3-8-flash-cyber/,
+  # Sep 2 2026): $0.75 / 1M input, $3.75 / 1M output. Rates are volatile and the
+  # introductory price may change — verify against the current Gemini API
+  # pricing page before trusting cost numbers. The announcement publishes no
+  # cache-read rate, so usd_per_cached_input_token is left unset and cache reads
+  # fall back to the full input rate; add it from the API pricing page (Gemini
+  # cached input is typically 25% of the input rate) to avoid overstating cost.
+  - name: antigravity
+    display_name: "Antigravity (gemini-3.8-flash)"
+    cli_path: agy
+    model_id: gemini-3.8-flash   # base slug; harness appends the effort (-high/…)
+    cost_source: antigravity_json
+    pricing:
+      usd_per_input_token:  0.00000075   # $0.75 / 1M (fresh input)
+      usd_per_output_token: 0.00000375   # $3.75 / 1M
+      # usd_per_cached_input_token:       # add from the Gemini API pricing page
+    # IMPORTANT: agy ignores the process cwd and writes into its own managed
+    # scratch dir (~/.gemini/antigravity-cli/...) unless the run workspace is
+    # passed as an ABSOLUTE path via --add-dir. The harness substitutes the
+    # {workspace} token with the run's absolute workspace path so the files the
+    # model writes land where the verifier looks. A relative "." does NOT work —
+    # agy resolves it against its scratch dir, not cwd.
+    #
+    # --print-timeout: agy's print mode aborts itself after 5m0s by default and
+    # returns {"status":"ERROR","error":"timeout waiting for response"} with a
+    # partial/empty result. Large tasks need longer, so raise it to comfortably
+    # exceed the benchmark's `timeout_minutes` below (Go duration string, e.g.
+    # "30m"). This is agy's OWN timeout — independent of the harness timeout.
+    cli_base_args: ["-p", "{prompt}", "--output-format", "json",
+                    "--model", "{model}", "--add-dir", "{workspace}",
+                    "--print-timeout", "30m",
+                    "--dangerously-skip-permissions"]
+    # To pin a specific agent, add: "--agent", "{agent}" above.
 
   # ── Devin (claude-opus-4.8) ───────────────────────────────────────────────
   # Devin has no JSON output mode, but `--export <file>` writes an ATIF

@@ -48,13 +48,33 @@ def test_effort_substituted_in_command(tmp_path, vibe_task):
     assert "--effort=low" in cmd
 
 
+def test_workspace_substituted_as_absolute_path(tmp_path, vibe_task):
+    """{workspace} renders as the run workspace's ABSOLUTE path. Antigravity's
+    `agy` ignores cwd and needs the workspace passed via `--add-dir <abs>`, so
+    the token must always resolve to an absolute path (never a relative "." that
+    agy would resolve against its own scratch dir)."""
+    t = mock_target()
+    # Runner-style: {workspace} inline in cli_base_args (as in the antigravity config).
+    t.cli_base_args = [t.cli_base_args[0], "--add-dir", "{workspace}"]
+    cfg = _cfg([t], tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+    cmd = VibeExecutor(cfg, vibe_task, ws, t)._build_command("PROMPT")
+    assert "--add-dir" in cmd
+    idx = cmd.index("--add-dir")
+    rendered = cmd[idx + 1]
+    assert rendered == str(ws.resolve())
+    assert rendered.startswith("/")  # absolute, not "." or a relative fragment
+
+
 @pytest.mark.parametrize(
-    "cost_source", [CostSource.CURSOR_JSON, CostSource.DEVIN_EXPORT]
+    "cost_source",
+    [CostSource.CURSOR_JSON, CostSource.DEVIN_EXPORT, CostSource.ANTIGRAVITY_JSON],
 )
 def test_effort_appended_to_model_slug(tmp_path, vibe_task, cost_source):
-    """Cursor and Devin select effort via a model-slug suffix, not a flag — the
-    harness appends the effort so every CLI in a comparison runs the same model
-    at the same reasoning level."""
+    """Cursor, Devin, and Antigravity select effort via a model-slug suffix, not
+    a flag — the harness appends the effort so every CLI in a comparison runs the
+    same model at the same reasoning level."""
     t = mock_target()
     t.cost_source = cost_source
     t.model_id = "claude-opus-5"
@@ -65,6 +85,35 @@ def test_effort_appended_to_model_slug(tmp_path, vibe_task, cost_source):
     ws.mkdir(parents=True)
     cmd = VibeExecutor(cfg, vibe_task, ws, t)._build_command("PROMPT")
     assert "--model=claude-opus-5-high" in cmd
+
+
+@pytest.mark.parametrize(
+    ("model_id", "effort", "expected"),
+    [
+        ("gemini-3.8-flash", "high", "gemini-3.8-flash-high"),
+        ("gemini-3.8-flash", "medium", "gemini-3.8-flash-medium"),
+        ("gemini-3.1-pro", "low", "gemini-3.1-pro-low"),
+        ("gpt-oss-120b", "medium", "gpt-oss-120b-medium"),
+        # Already carries the effort → passed through verbatim.
+        ("gemini-3.8-flash-high", "low", "gemini-3.8-flash-high"),
+    ],
+)
+def test_antigravity_effort_appended_to_gemini_slug(
+    tmp_path, vibe_task, model_id, effort, expected
+):
+    """Antigravity's gemini-* / gpt-oss-* slugs carry the effort as a suffix, so
+    the harness appends the task's effort to a base slug and leaves a slug that
+    already ends in an effort level untouched."""
+    t = mock_target()
+    t.cost_source = CostSource.ANTIGRAVITY_JSON
+    t.model_id = model_id
+    t.cli_base_args = [t.cli_base_args[0], "--model={model}"]
+    cfg = _cfg([t], tmp_path)
+    cfg.effort = effort
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+    cmd = VibeExecutor(cfg, vibe_task, ws, t)._build_command("PROMPT")
+    assert f"--model={expected}" in cmd
 
 
 @pytest.mark.parametrize(

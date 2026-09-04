@@ -56,11 +56,16 @@ _MAX_CAPTURE = 5_000_000
 
 # CLIs that select the reasoning effort by suffixing the model slug instead of
 # taking a separate --effort flag (Cursor: "claude-opus-4-8-high", Devin:
-# "claude-opus-5-high"). See _build_command.
-_EFFORT_IN_MODEL_SLUG = (CostSource.CURSOR_JSON, CostSource.DEVIN_EXPORT)
+# "claude-opus-5-high", Antigravity: "gemini-3.8-flash-high"). See _build_command.
+_EFFORT_IN_MODEL_SLUG = (
+    CostSource.CURSOR_JSON,
+    CostSource.DEVIN_EXPORT,
+    CostSource.ANTIGRAVITY_JSON,
+)
 # Only provider models use the suffix pattern; a CLI's own house models
-# (e.g. Cursor's composer-2.5) take the slug verbatim.
-_EFFORT_SLUG_PREFIXES = ("claude-", "gpt-")
+# (e.g. Cursor's composer-2.5) take the slug verbatim. Antigravity exposes its
+# models with the effort already in the slug (gemini-*, gpt-oss-*).
+_EFFORT_SLUG_PREFIXES = ("claude-", "gpt-", "gemini-")
 _EFFORT_SLUG_SUFFIXES = (
     "-low", "-medium", "-high", "-xhigh", "-max",
     "-low-fast", "-medium-fast", "-high-fast", "-xhigh-fast", "-max-fast",
@@ -222,11 +227,21 @@ class BaseExecutor:
                 if not any(model_id.endswith(sfx) for sfx in _EFFORT_SLUG_SUFFIXES):
                     model_id = f"{model_id}-{effort}"
 
+        # Absolute path to this run's workspace. Some CLIs (e.g. Antigravity's
+        # `agy`) ignore the process cwd and write into their own managed scratch
+        # directory unless the target directory is passed explicitly as an
+        # ABSOLUTE path (a relative "." is resolved against the scratch dir, not
+        # cwd). Exposed as the {workspace} template token so such a runner can
+        # inject e.g. `--add-dir {workspace}` and have files land where the
+        # verifier looks.
+        workspace = str(Path(self.workspace).resolve())
+
         cmd: list[str] = [t.cli_path]
         prompt_used = False
         for arg in t.cli_base_args:
             rendered = arg.format(
-                model=model_id, prompt=prompt, agent=agent or "", effort=effort
+                model=model_id, prompt=prompt, agent=agent or "",
+                effort=effort, workspace=workspace,
             )
             if "{prompt}" in arg:
                 prompt_used = True
