@@ -1,0 +1,44 @@
+name: CI
+
+# Run on pull requests targeting main, and on pushes to main (post-merge check).
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel superseded runs for the same PR/branch to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      # The suite is hermetic: it uses a MockCLI and needs no network,
+      # real CLI, API key, or Docker (see README "Run the test suite").
+      # Lint (ruff + black) is intentionally deferred to a follow-up PR once
+      # the tree is made lint-clean.
+      - name: Run tests
+        run: pytest
