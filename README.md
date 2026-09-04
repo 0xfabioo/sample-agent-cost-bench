@@ -14,7 +14,7 @@ Bring any model, any CLI, and any use case — a real GitHub repo with your own 
 
 The framework is designed to be flexible:
 
-- **Any CLI** — Kiro, Claude Code, GitHub Copilot, Cursor, OpenAI Codex, Devin - Currently supported CLI's.
+- **Any CLI** — Kiro, Claude Code, GitHub Copilot, Cursor, OpenAI Codex, Antigravity, Devin - Currently supported CLI's.
 - **Any model** — Anthropic (Claude), OpenAI (o-series, GPT-5.x) or anything your CLI exposes.
 - **Any use case** — greenfield tasks included out of the box, or bring your own GitHub repo (public or private). The framework clones it, hands it to the model, and verifies the result.
 - **Multiple verification options** — pytest, Docker containers, custom scorers, or LLM-judge rubrics. Pick the one that fits; no verification code is required for rubric-graded tasks.
@@ -25,7 +25,7 @@ Cost is always reported two ways: USD and native units (credits / AI Credits / t
 
 - **Python 3.10+**
 - **The coding CLI(s) you want to benchmark**, installed and logged in:
-  - `cli-compare`: the CLIs you list as runners (e.g. `kiro-cli`, `claude`, `copilot`, `agent`, `codex`, `devin`)
+  - `cli-compare`: the CLIs you list as runners (e.g. `kiro-cli`, `claude`, `copilot`, `agent`, `codex`, `agy`, `devin`)
   - `model-compare`: the Kiro CLI
 - **Docker** — only if you run the multi-language tasks (C#/.NET, Java,
   TypeScript, Terraform, Helm). Build images once with `./tasks/docker/build-images.sh`.
@@ -72,6 +72,7 @@ export ANTHROPIC_API_KEY=...     # Claude Code (or use `claude login`)
 export GITHUB_TOKEN=...          # Copilot (or use `copilot auth login`)
 export CURSOR_API_KEY=...        # Cursor (or use `cursor login`)
 export OPENAI_API_KEY=...        # Codex (or use `codex auth login`)
+# Antigravity: use `agy login`
 # Devin: use `devin auth login` (no env-var equivalent)
 ```
 
@@ -87,9 +88,10 @@ Pricing rates are volatile and change over time. Check each vendor's current pri
 |-----|----------------|-----------|
 | **Kiro** | `usd_per_credit: 0.04` | Credits consumed fractionally per task; check your plan's credit value |
 | **Claude Code** | No pricing config needed — reports `total_cost_usd` directly | Direct API billing; cost reported in CLI JSON output |
-| **GitHub Copilot** | 1 AI Credit = $0.01 USD|
+| **GitHub Copilot** | No pricing config needed — cost derived from AI-credit (AIU) telemetry in the JSON output, 1 AIU = $0.01 USD |
 | **Cursor** | Token-level rates (see below) | [cursor.com/docs/models-and-pricing](https://cursor.com/docs/models-and-pricing) |
 | **OpenAI Codex** | Token-level rates (see below) | [platform.openai.com/docs/pricing](https://platform.openai.com/docs/pricing) |
+| **Antigravity** | Token-level rates (see below) | Verify the per-token rates for your chosen `agy` model |
 | **Devin** | Token-level rates (see below) | `devin models list` prints per-MTok rates per model slug |
 
 #### Token-level pricing (Cursor, Codex, and Devin)
@@ -127,7 +129,7 @@ The harness automatically detects how to read cost from each CLI based on its bi
 agent-cost-bench cli-compare run config.cli-compare.yaml
 ```
 
-The example config defines runners for Kiro, Claude Code, Copilot, Cursor, and Devin. Cost is auto-detected from the binary name — you provide the CLI path, model ID, and pricing rates:
+The example config defines runners for Kiro, Claude Code, Copilot, Cursor, Antigravity, and Devin. Cost is auto-detected from the binary name — you provide the CLI path, model ID, and pricing rates:
 
 ```yaml
 runners:
@@ -183,7 +185,48 @@ runners:
                     "--export", "devin-usage.json"]
 ```
 
-> **Note:** Cursor and Devin encode effort/thinking level as part of the model slug (e.g., `claude-opus-4-8-high`), not as a separate flag. The harness auto-appends the task's effort level to the `model_id` unless you bake it in yourself. This is what keeps a cross-CLI run fair — every runner ends up on the same model at the same reasoning effort even though they spell it differently.
+> **Note:** Cursor, Devin, and Antigravity encode effort/thinking level as part of the model slug (e.g., `claude-opus-4-8-high`, `gemini-3.8-flash-high`), not as a separate flag. The harness auto-appends the task's effort level to the `model_id` unless you bake it in yourself. This is what keeps a cross-CLI run fair — every runner ends up on the same model at the same reasoning effort even though they spell it differently.
+
+#### Antigravity specifics
+
+The Antigravity CLI (`agy`) reports cost from `agy -p "<prompt>" --output-format json`, which prints a single JSON object with a `usage` block (`input_tokens`, `output_tokens`, `thinking_tokens`, `cache_read_tokens`). Cost is computed per-token like Cursor/Codex: `input_tokens × input_rate + cache_read_tokens × cached_rate + output_tokens × output_rate`. `thinking_tokens` is a subset of `output_tokens` and is reported but not billed separately.
+
+Like Cursor and Devin, Antigravity bakes the reasoning effort **into the model slug** rather than taking a separate `--effort` flag. `agy models` lists ids such as `gemini-3.8-flash-high` / `-medium` / `-low`, `gemini-3.1-pro-high` / `-low`, and `gpt-oss-120b-medium`. So the runner passes only `--model`, and you either set `model_id` to a full slug that already carries the effort, or set it to the base slug (`gemini-3.8-flash`) and let the harness append the task's effort (`-high`/`-medium`/`-low`) — the same mechanism used for Cursor and Devin, which keeps a cross-CLI run fair.
+
+```yaml
+- name: antigravity
+  display_name: "Antigravity (gemini-3.8-flash)"
+  cli_path: agy
+  model_id: gemini-3.8-flash   # base slug; harness appends the effort (-high/…)
+  cost_source: antigravity_json
+  pricing:
+    usd_per_input_token:  0.00000075   # $0.75 / 1M (fresh input)
+    usd_per_output_token: 0.00000375   # $3.75 / 1M
+    # usd_per_cached_input_token:       # add from the Gemini API pricing page
+  cli_base_args: ["-p", "{prompt}", "--output-format", "json",
+                  "--model", "{model}", "--add-dir", "{workspace}",
+                  "--print-timeout", "30m",
+                  "--dangerously-skip-permissions"]
+```
+
+The rates above are Gemini 3.8 Flash's introductory pricing ($0.75/1M input, $3.75/1M output) from [Google's announcement](https://blog.google/innovation-and-ai/models-and-research/gemini-models/3-8-flash-and-3-8-flash-cyber/). Content was rephrased for compliance with licensing restrictions.
+
+> **Caveat:** These are introductory rates and may change — verify against the current Gemini API pricing page before trusting cost numbers, and update the block whenever you change `model_id`. The announcement publishes no cache-read rate, so `usd_per_cached_input_token` is left unset and cache reads fall back to the full input rate; supply it from the API pricing page (Gemini cached input is typically 25% of the input rate) to avoid overstating cost in agentic runs where most prompt tokens are cache hits.
+
+Two `agy`-specific flags in the block above are **not optional** for the benchmark — leaving either out produces a failing run that looks like a model failure:
+
+- **`--add-dir {workspace}`** — `agy` ignores the process working directory and writes generated files into its own managed scratch dir (`~/.gemini/antigravity-cli/...`) unless the run workspace is passed as an **absolute** path via `--add-dir`. The harness substitutes `{workspace}` with the run's absolute workspace path so files land where the verifier looks. A relative `.` does **not** work — `agy` resolves it against its scratch dir, not cwd. Without this, verification finds no code and scores 0%.
+- **`--print-timeout 30m`** — `agy`'s print mode aborts itself after **5 minutes** by default and returns `{"status":"ERROR","error":"timeout waiting for response"}` with a partial or empty result. Large tasks need longer, so raise it to comfortably exceed the harness `timeout_minutes`. This is `agy`'s own timeout, independent of the harness timeout. Symptom when too low: a truncated result and a low pass rate from partial files.
+
+**Tips for running Antigravity:**
+
+- **Log in first** with `agy login`, and confirm your account can use the model you set — run `agy models` and copy an exact id (base slug like `gemini-3.8-flash`, or a full slug like `gemini-3.8-flash-high`).
+- **Expect slower wall-clock times.** In practice Gemini 3.8 Flash spent several minutes on the larger multi-file tasks. Budget headroom in both `--print-timeout` and the harness `timeout_minutes`.
+- **Sanity-check the result status** in the run log's `RESPONSE` block: it should read `"status":"SUCCESS"`, not `"status":"ERROR"`. An `ABNORMAL EXIT ... exit 1` line for the antigravity target means `agy` returned a non-success result — read the `error` field to see why. Two common ones:
+  - `"timeout waiting for response"` → the print timeout was hit; raise `--print-timeout`.
+  - `"Individual quota reached. Please upgrade your subscription..."` → your Antigravity account hit its usage quota (the message includes when it resets). This is an account limit, not a config problem — the run will score 0% until the quota resets or you upgrade. Watch for this when running several large tasks in a row.
+- **If the pass rate is unexpectedly 0%**, first read the `RESPONSE` status/error (quota or timeout above), then check where files landed. If the response's `file://` links point under `~/.gemini/antigravity-cli/` instead of the run workspace, `--add-dir {workspace}` is missing or was passed as a relative path.
+- **Cost is derived from token counts, not a billed dollar figure** (`agy` reports no `total_cost_usd`), so accuracy depends entirely on the per-token rates you configure. Update them whenever you change `model_id`.
 
 #### Devin specifics
 
@@ -376,6 +419,7 @@ AGENT_COST_BENCH_RESULT: {"score": 0.7, "checkpoints": {...}, "summary": "..."}
 | `copilot` | `--output-format json` JSONL + `~/.copilot/session-state/` `totalNanoAiu` |
 | `codex` | `codex exec --json` → `turn.completed` token counts |
 | `cursor` / `agent` | `-p --output-format json` → `usage` object with token counts |
+| `agy` / `antigravity` | `-p --output-format json` → `usage` object with token counts |
 | `devin` | `--export <file>` ATIF conversation export → `final_metrics` token counts |
 | Any + per-token pricing | Custom regex with `(?P<input>...)` / `(?P<output>...)` groups |
 

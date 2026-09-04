@@ -100,6 +100,7 @@ class CostSource(str, Enum):
     COPILOT_JSON = "copilot_json"        # parse `copilot --output-format json` JSONL + session-state AIU
     CODEX_JSON = "codex_json"            # parse `codex exec --json` JSONL turn.completed events
     CURSOR_JSON = "cursor_json"          # parse `cursor -p --output-format json` result event
+    ANTIGRAVITY_JSON = "antigravity_json"  # parse `agy -p --output-format json` result object
     DEVIN_EXPORT = "devin_export"        # parse `devin -p --export <file>` ATIF final_metrics
     TOKENS = "tokens"                    # parse token counts via regex, price per-token
     PREMIUM_REQUEST = "premium_request"  # fixed N premium/credit requests per run × price
@@ -121,6 +122,10 @@ class Pricing(BaseModel):
       - claude_json       -> (none; CLI reports total_cost_usd directly)
       - copilot_json      -> usd_per_premium_request (fallback) and/or token rates
       - codex_json        -> usd_per_input_token + usd_per_output_token + usd_per_reasoning_token
+      - cursor_json       -> usd_per_input_token + usd_per_cached_input_token
+                             + usd_per_cache_write_token + usd_per_output_token
+      - antigravity_json  -> usd_per_input_token + usd_per_cached_input_token
+                             + usd_per_output_token
       - devin_export      -> usd_per_input_token + usd_per_cached_input_token
                              + usd_per_output_token
       - tokens            -> usd_per_input_token + usd_per_output_token

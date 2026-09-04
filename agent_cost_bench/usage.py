@@ -16,12 +16,15 @@ requests) so the reports can always show them side by side.
                 carries cumulative token counts. Read from the run's workspace
                 and priced with the per-token rates from the config.
 
-  Copilot   ──  `copilot --output-format json` prints JSONL. The terminal
-                `result` event carries a sessionId; we read
-                ~/.copilot/session-state/<id>/events.jsonl and extract the
-                `session.shutdown` event's `totalNanoAiu` — the true AI-credit
-                cost (1 AIU = 1 AI Credit = $0.01 USD). This is more accurate
-                than the legacy `premiumRequests` multiplier (0.33 for Haiku).
+  Copilot   ──  `copilot --output-format json` prints JSONL. Cost comes from the
+                real AI-credit (AIU) telemetry: newer CLIs stream a per-turn
+                `total_nano_aiu` in each `model.model_call_success` event (summed
+                across turns); older CLIs write `totalNanoAiu` to
+                ~/.copilot/session-state/<id>/events.jsonl (located via a
+                `type:result` event's sessionId). 1 AIU = 1 AI Credit = $0.01.
+                When no AIU source is present, cost is None — we do NOT fall back
+                to a flat premiumRequests multiplier, which understates an agentic
+                run (dozens–hundreds of credits) by orders of magnitude.
 
 A generic ``tokens`` regex parser and a fixed ``premium_request`` parser let a
 new CLI be added from config alone.
@@ -216,7 +219,6 @@ def parse_claude_usage(stdout: str, stderr: str, pricing: Pricing) -> Usage:
 
 _TOKEN_IN_KEYS = ("input_tokens", "prompt_tokens", "inputTokens", "promptTokens")
 _TOKEN_OUT_KEYS = ("output_tokens", "completion_tokens", "outputTokens", "completionTokens")
-_PREMIUM_KEYS = ("premiumRequests", "premium_requests", "credits")
 _SESSION_DURATION_KEYS = ("sessionDurationMs", "session_duration_ms")
 
 
@@ -273,14 +275,67 @@ def read_copilot_session_aiu(session_id: str, home: Path | None = None) -> float
     return None
 
 
+def _sum_copilot_inline_aiu(objs: list[dict]) -> float | None:
+    """Sum the per-turn AIU cost that newer Copilot CLIs stream inline.
+
+    Copilot >= ~1.0.8x emits a ``model.model_call_success`` event per model turn
+    carrying the turn's AI-credit cost as ``total_nano_aiu`` (snake_case, in
+    nano-AIU: 1e9 nanoAIU = 1 AIU = 1 AI Credit = $0.01). The value appears at
+    two equivalent paths in the same event::
+
+        data.copilotUsage.total_nano_aiu
+        data.responseChunk.copilot_usage.total_nano_aiu
+
+    They are duplicates of the SAME turn cost, so we read at most ONE per event
+    (preferring ``copilotUsage``) to avoid double counting, and sum across turns
+    — the values are per-turn, not cumulative. Returns total AIU (credits) or
+    ``None`` when no such event is present (older CLIs).
+    """
+    total_nano = 0
+    saw = False
+    for o in objs:
+        if o.get("type") != "model.model_call_success":
+            continue
+        data = o.get("data")
+        if not isinstance(data, dict):
+            continue
+        nano = None
+        cu = data.get("copilotUsage")
+        if isinstance(cu, dict):
+            nano = cu.get("total_nano_aiu")
+        if nano is None:
+            rc = data.get("responseChunk")
+            if isinstance(rc, dict):
+                cu2 = rc.get("copilot_usage")
+                if isinstance(cu2, dict):
+                    nano = cu2.get("total_nano_aiu")
+        if isinstance(nano, (int, float)) and nano >= 0:
+            total_nano += nano
+            saw = True
+    if not saw:
+        return None
+    return total_nano / 1_000_000_000  # nano-AIU -> AIU (credits)
+
+
 def parse_copilot_usage(stdout: str, stderr: str, pricing: Pricing, home: Path | None = None) -> Usage:
     """
-    Parse `copilot --output-format json` (JSONL) and prefer the real
-    session-state ``totalNanoAiu`` cost when the session file is present.
+    Parse ``copilot --output-format json`` (JSONL) and derive cost from the real
+    AI-credit (AIU) telemetry, in priority order:
+
+      1. Inline per-turn ``total_nano_aiu`` streamed in ``model.model_call_success``
+         events (newer CLIs). Authoritative billed cost; needs no session file.
+      2. ``totalNanoAiu`` from the session-state ``session.shutdown`` record,
+         located via a ``type:result`` event's ``sessionId`` (older CLIs).
+
+    1 AIU = 1 AI Credit = $0.01. When neither AIU source is available, cost is
+    reported as ``None``. Copilot cost is derived purely from AIU — the legacy
+    ``premiumRequests`` multiplier is intentionally NOT used: it is wildly
+    inaccurate for an agentic run (one run bills dozens to hundreds of AI
+    credits, not one premium request) and misleadingly understates Copilot in a
+    cost comparison. Token counts are still reported for transparency.
     """
     objs = _find_json_objects(stdout) + _find_json_objects(stderr)
     in_tok = out_tok = 0
-    measured_premium = None
     saw_tokens = False
     seconds = None
     for o in objs:
@@ -292,41 +347,32 @@ def parse_copilot_usage(stdout: str, stderr: str, pricing: Pricing, home: Path |
         if out is not None:
             out_tok += int(out)
             saw_tokens = True
-        p = _dig(o, _PREMIUM_KEYS)
-        if p is not None:
-            measured_premium = (measured_premium or 0.0) + float(p)
         ms = _dig(o, _SESSION_DURATION_KEYS)
         if ms is not None:
             seconds = ms / 1000.0
 
-    premium = measured_premium if measured_premium is not None else pricing.requests_per_run
-
     cost = None
-    if (
-        measured_premium is None
-        and saw_tokens
-        and pricing.usd_per_input_token is not None
-        and pricing.usd_per_output_token is not None
-    ):
-        cost = in_tok * pricing.usd_per_input_token + out_tok * pricing.usd_per_output_token
-    elif pricing.usd_per_premium_request is not None:
-        cost = premium * pricing.usd_per_premium_request
-
     raw_credits = None
 
-    # Prefer the accurate session-state AIU cost when available.
-    session_id = _extract_copilot_session_id(stdout)
-    if session_id:
-        real_cost = read_copilot_session_aiu(session_id, home=home)
-        if real_cost is not None:
-            cost = real_cost
-            raw_credits = real_cost / 0.01  # AIU credits driving the cost
+    # 1. Inline per-turn AIU (newer Copilot CLIs) — authoritative billed cost.
+    inline_aiu = _sum_copilot_inline_aiu(objs)
+    if inline_aiu is not None:
+        raw_credits = inline_aiu
+        cost = inline_aiu * 0.01  # 1 AIU = $0.01
+
+    # 2. Otherwise, the session-state AIU record (older CLIs), located by sessionId.
+    if cost is None:
+        session_id = _extract_copilot_session_id(stdout)
+        if session_id:
+            real_cost = read_copilot_session_aiu(session_id, home=home)
+            if real_cost is not None:
+                cost = real_cost
+                raw_credits = real_cost / 0.01  # AIU credits driving the cost
 
     return Usage(
         cost_usd=cost,
         input_tokens=in_tok if saw_tokens else None,
         output_tokens=out_tok if saw_tokens else None,
-        premium_requests=premium,
         seconds=seconds,
         raw_credits=raw_credits,
     )
@@ -745,6 +791,98 @@ def parse_cursor_usage(stdout: str, stderr: str, pricing: Pricing) -> Usage:
 
 
 # ---------------------------------------------------------------------------
+# Antigravity CLI JSON (`agy -p "..." --output-format json`)
+# ---------------------------------------------------------------------------
+
+
+def parse_antigravity_usage(stdout: str, stderr: str, pricing: Pricing) -> Usage:
+    """Parse the Antigravity CLI headless JSON result.
+
+    ``agy -p "<prompt>" --output-format json`` prints a single JSON object::
+
+        {
+          "conversation_id": "978c29ed-...",
+          "status": "SUCCESS",
+          "response": "...",
+          "duration_seconds": 5.909435,
+          "num_turns": 1,
+          "usage": {
+            "input_tokens": 5563,
+            "output_tokens": 1250,
+            "thinking_tokens": 611,
+            "cache_read_tokens": 8130,
+            "total_tokens": 6813
+          }
+        }
+
+    Token semantics (mirrors Codex / Cursor billing):
+      - ``input_tokens``       fresh (non-cached) prompt tokens
+      - ``cache_read_tokens``  prompt tokens served from cache (cheaper)
+      - ``output_tokens``      generated tokens
+      - ``thinking_tokens``    reasoning tokens — a SUBSET of ``output_tokens``
+                               (informational only, not billed separately)
+
+    Cost formula::
+
+        cost = input_tokens      × usd_per_input_token
+             + cache_read_tokens  × usd_per_cached_input_token
+             + output_tokens      × usd_per_output_token
+
+    When ``usd_per_cached_input_token`` is absent, cached tokens are billed at
+    the regular input rate (conservative fallback). Returns an empty ``Usage()``
+    when no result object is found. Timing comes from ``duration_seconds``.
+    """
+    objs = _find_json_objects(stdout) or _find_json_objects(stderr)
+    result_obj = None
+    for o in objs:
+        if "usage" in o or o.get("status") or "conversation_id" in o:
+            result_obj = o
+    if result_obj is None and objs:
+        result_obj = objs[-1]
+    if not result_obj:
+        return Usage()
+
+    duration = result_obj.get("duration_seconds")
+    seconds = float(duration) if isinstance(duration, (int, float)) else None
+
+    usage = result_obj.get("usage") or {}
+    in_tok = _safe_int(usage.get("input_tokens"))
+    out_tok = _safe_int(usage.get("output_tokens"))
+    thinking_tok = _safe_int(usage.get("thinking_tokens"))
+    cache_read = _safe_int(usage.get("cache_read_tokens"))
+
+    # Total input processed = fresh input + cache reads.
+    total_in = None
+    if in_tok is not None or cache_read is not None:
+        total_in = (in_tok or 0) + (cache_read or 0)
+
+    cost = None
+    p_in = pricing.usd_per_input_token
+    p_out = pricing.usd_per_output_token
+    if p_in is not None and p_out is not None and in_tok is not None and out_tok is not None:
+        p_cached = (
+            pricing.usd_per_cached_input_token
+            if pricing.usd_per_cached_input_token is not None
+            else p_in
+        )
+        cost = (
+            in_tok * p_in
+            + (cache_read or 0) * p_cached
+            + out_tok * p_out
+            # thinking_tokens intentionally omitted — subset of output_tokens
+        )
+
+    return Usage(
+        cost_usd=cost,
+        input_tokens=total_in,
+        cached_input_tokens=cache_read,
+        output_tokens=out_tok,
+        reasoning_output_tokens=thinking_tok,
+        seconds=seconds,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Devin CLI ATIF export (`devin -p --export <file>`)
 # ---------------------------------------------------------------------------
 
@@ -915,6 +1053,8 @@ def parse_usage(
         return parse_codex_usage(stdout, stderr, p)
     if src == CostSource.CURSOR_JSON:
         return parse_cursor_usage(stdout, stderr, p)
+    if src == CostSource.ANTIGRAVITY_JSON:
+        return parse_antigravity_usage(stdout, stderr, p)
     if src == CostSource.DEVIN_EXPORT:
         return parse_devin_usage(p, workspace)
     if src == CostSource.KAS_PROXY_METRICS:
