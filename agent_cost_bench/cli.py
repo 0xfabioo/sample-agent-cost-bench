@@ -487,6 +487,104 @@ def new_task(task_id, mode, tasks_dir, with_tests, repo):
     )
 
 
+@main.command("import-tasks")
+@click.option(
+    "--type", "source_type", required=True,
+    help="Task source type: terminal-bench (Terminal-Bench 2.x/Harbor).",
+)
+@click.option(
+    "--path", "source_path", required=True, type=click.Path(exists=True),
+    help="A single task dir OR a directory of task dirs to import.",
+)
+@click.option(
+    "--into", "dest_root", default="tasks",
+    help="Native tasks root to write fixtures into (default: tasks).",
+)
+@click.option(
+    "--task", "only", multiple=True,
+    help="Import only these source task name(s) (repeatable). Default: all.",
+)
+@click.option(
+    "--mode", default="vibe", type=click.Choice(["vibe", "spec-driven"]),
+    help="Native mode for the imported fixtures (Terminal-Bench tasks are vibe).",
+)
+@click.option("--no-overwrite", is_flag=True, default=False,
+              help="Skip tasks whose destination already exists instead of replacing it.")
+@click.option("--build", "build_images", is_flag=True, default=False,
+              help="Build the Docker image for each imported task that ships a Dockerfile.")
+def import_tasks(source_type, source_path, dest_root, only, mode, no_overwrite, build_images):
+    """Convert Terminal-Bench 2.1 tasks into native fixtures.
+
+    Examples:
+
+      agent-cost-bench import-tasks --type terminal-bench --path ~/terminal-bench/tasks
+
+      agent-cost-bench import-tasks --type terminal-bench --path ~/tb/tasks \\
+          --task hello-world --task fix-permissions
+
+      agent-cost-bench import-tasks --type terminal-bench --path ~/tb/tasks --into tasks
+    """
+    from .importers import import_task_source
+    from .importers.base import ImportError_, list_importers
+
+    try:
+        imported = import_task_source(
+            source_type=source_type,
+            source_path=source_path,
+            dest_root=dest_root,
+            native_mode=mode,
+            only=list(only) or None,
+            overwrite=not no_overwrite,
+        )
+    except ImportError_ as e:
+        console.print(f"[red]Import failed: {e}[/red]")
+        console.print(f"[dim]Supported types: {', '.join(list_importers())}[/dim]")
+        sys.exit(1)
+
+    if not imported:
+        console.print("[yellow]No tasks imported (nothing matched the filter).[/yellow]")
+        sys.exit(1)
+
+    table = Table(title=f"Imported {len(imported)} task(s) from {source_type}", show_lines=False)
+    table.add_column("Source", style="dim")
+    table.add_column("Native ID", style="cyan")
+    table.add_column("Image")
+    table.add_column("Notes")
+    for rec in imported:
+        note = rec.warnings[0] if rec.warnings else ""
+        table.add_row(rec.source_id, rec.native_id, rec.image or "—", note[:60])
+    console.print(table)
+    dest_hint = Path(dest_root) / mode
+    console.print(f"[green]✓[/green] Fixtures written under [cyan]{dest_hint}[/cyan]")
+
+    # Tasks that ship a Dockerfile carry a verify.build_context; the framework
+    # can build the image (now with --build, or automatically at run time).
+    buildable = [rec for rec in imported if rec.image and (rec.dest_dir / "verify" / "environment").is_dir()]
+    if build_images and buildable:
+        from .verify.docker_build import ensure_image
+
+        console.print("\nBuilding Docker images for imported tasks …")
+        for rec in buildable:
+            context = rec.dest_dir / "verify" / "environment"
+            result = ensure_image(rec.image, context, log=lambda m: console.print(f"[dim]  {m}[/dim]"))
+            if result.ok:
+                console.print(f"[green]✓[/green] {rec.image} ready")
+            else:
+                console.print(f"[yellow]⚠ {rec.image}: {result.detail}[/yellow]")
+    elif buildable:
+        console.print(
+            f"[dim]{len(buildable)} task(s) ship a Dockerfile; their image is built "
+            f"automatically at run time (or now with --build).[/dim]"
+        )
+
+    any_warn = any(rec.warnings for rec in imported)
+    if any_warn:
+        console.print(
+            "[yellow]Some tasks could not resolve a Docker image "
+            "(see WARNING lines in the emitted task.yaml).[/yellow]"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

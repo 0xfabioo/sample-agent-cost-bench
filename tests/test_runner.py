@@ -100,3 +100,96 @@ async def test_repeats_and_aggregation(tmp_path, monkeypatch):
     assert run.total_runs == 3
     stats = run.cost_stats_by_target()
     assert stats[run.results[0].target]["runs"] == 3.0
+
+
+def test_autobuild_images_builds_missing_image(tmp_path, monkeypatch):
+    """A task with verify.build_context triggers an on-demand image build."""
+    from pathlib import Path
+
+    from agent_cost_bench.models import TaskConfig, VerifySpec
+    import agent_cost_bench.verify.docker_build as db
+
+    # A task whose Docker image ships as a build context.
+    task_dir = tmp_path / "tasks" / "vibe" / "imported"
+    (task_dir / "verify" / "environment").mkdir(parents=True)
+    (task_dir / "verify" / "environment" / "Dockerfile").write_text("FROM scratch\n")
+    task = TaskConfig(
+        id="imported",
+        description="d",
+        prompt="do it",
+        verify=VerifySpec(
+            image="tb-imported:imported",
+            build_context="verify/environment",
+            test_cmd="true",
+            parser="reward-file",
+        ),
+    )
+    task.task_dir = task_dir
+
+    calls = []
+
+    class _Res:
+        ok = True
+        built = True
+        detail = "built"
+
+    def fake_ensure(image, context, **kw):
+        calls.append((image, Path(context)))
+        return _Res()
+
+    monkeypatch.setattr("agent_cost_bench.verify.docker_build.ensure_image", fake_ensure)
+
+    cfg = _cfg(tmp_path, [mock_target()], str(tmp_path / "tasks"))
+    runner = BenchmarkRunner(cfg)
+    runner._ensure_images([task])
+
+    assert len(calls) == 1
+    image, context = calls[0]
+    assert image == "tb-imported:imported"
+    assert context == (task_dir / "verify" / "environment").resolve()
+
+
+def test_ensure_images_pulls_prebuilt_image(tmp_path, monkeypatch):
+    """A task referencing a prebuilt image with NO build_context triggers a
+    docker pull (not a build)."""
+    from agent_cost_bench.models import TaskConfig, VerifySpec
+    import agent_cost_bench.verify.docker_build as db
+
+    # Prebuilt, externally-hosted image (e.g. a Terminal-Bench task image).
+    task = TaskConfig(
+        id="tb-prebuilt",
+        description="d",
+        prompt="do it",
+        verify=VerifySpec(
+            image="alexgshaw/adaptive-rejection-sampler:20251031",
+            test_cmd="true",
+            parser="reward-file",
+        ),
+    )
+
+    pulled = []
+    built = []
+
+    class _Res:
+        ok = True
+        built = True
+        detail = "pulled"
+
+    def fake_pull(image, **kw):
+        pulled.append(image)
+        return _Res()
+
+    def fake_build(image, context, **kw):
+        built.append(image)
+        return _Res()
+
+    monkeypatch.setattr("agent_cost_bench.verify.docker_build.ensure_image_pulled", fake_pull)
+    monkeypatch.setattr("agent_cost_bench.verify.docker_build.ensure_image", fake_build)
+
+    cfg = _cfg(tmp_path, [mock_target()], str(tmp_path / "tasks"))
+    runner = BenchmarkRunner(cfg)
+    runner._ensure_images([task])
+
+    # Pulled, never built — no build context means there's nothing to build.
+    assert pulled == ["alexgshaw/adaptive-rejection-sampler:20251031"]
+    assert built == []

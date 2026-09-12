@@ -12,6 +12,7 @@ Nothing is written to the host workspace, so no root-owned files leak out.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import tempfile
 import time
@@ -86,8 +87,15 @@ exit $ec
             results_dir = Path(tempfile.mkdtemp(prefix="agent_cost_bench-verify-"))
         timeout = spec.timeout_seconds or min(self.task.timeout_minutes * 60, 600)
 
+        # Effective network: an explicit AGENT_COST_BENCH_VERIFY_NETWORK env var
+        # overrides the task's declared value. This lets a run grant verify
+        # containers network access (e.g. "bridge") without editing fixtures —
+        # some imported tasks' test scripts install dependencies at verify time
+        # and fail under the default "none".
+        network = os.environ.get("AGENT_COST_BENCH_VERIFY_NETWORK", "").strip() or spec.network
+
         cmd = [
-            get_runtime(), "run", "--rm", f"--network={spec.network}",
+            get_runtime(), "run", "--rm", f"--network={network}",
             "-v", f"{src_dir}:{_CONTAINER_SRC}:ro",
             "-v", f"{results_dir}:{_CONTAINER_RESULTS}",
             "-e", f"SRC_RO={_CONTAINER_SRC}",
