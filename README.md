@@ -416,8 +416,7 @@ AGENT_COST_BENCH_RESULT: {"score": 0.7, "checkpoints": {...}, "summary": "..."}
 ## Bring your own tasks (Terminal-Bench 2.1)
 
 Want more tasks to compare CLIs on than the ones bundled here? You can pull in tasks from
-[Terminal-Bench](https://github.com/laude-institute/terminal-bench) and run your CLIs against
-them. The framework imports Terminal-Bench 2.x tasks (Harbor layout: `task.toml` +
+[Terminal-Bench](https://github.com/harbor-framework/terminal-bench-2-1) and run your CLIs against them. The framework imports Terminal-Bench 2.x tasks (Harbor layout: `task.toml` +
 `instruction.md` + `environment/` + `tests/`; older 1.x layouts are handled too), converts each
 to a native fixture, and grades it with the task's **own** hidden test suite — giving you a pool
 of real, third-party tasks for the cost/quality comparison without authoring them yourself.
