@@ -824,3 +824,79 @@ def test_antigravity_dispatch_via_parse_usage():
     assert u.output_tokens == 300
     expected = 2000 * 0.00000125 + 1000 * 0.0000003125 + 300 * 0.00001
     assert abs(u.cost_usd - expected) < 1e-12
+
+
+# ---------------------------------------------------------------------------
+# Bob CLI JSON tests
+# ---------------------------------------------------------------------------
+
+
+def _bob_result(
+    session_costs: float = 0.041,
+    duration_ms: int = 3942,
+    status: str = "success",
+) -> str:
+    import json as _json
+    return _json.dumps({
+        "type": "result",
+        "timestamp": "2026-09-08T09:39:25.829Z",
+        "status": status,
+        "stats": {
+            "task_id": "950a5f413d10f6521e9bb56b5ea5c923",
+            "duration_ms": duration_ms,
+            "session_costs": session_costs,
+            "max_cost": 0,
+            "tool_calls": 1,
+        },
+        "last_message": "Hello, World!",
+    })
+
+
+def test_bob_cost_and_duration():
+    """session_costs maps to cost_usd; duration_ms maps to seconds."""
+    from agent_cost_bench.usage import parse_bob_usage
+    u = parse_bob_usage(_bob_result(session_costs=0.04098, duration_ms=3942), "", Pricing())
+    assert abs(u.cost_usd - 0.04098) < 1e-9
+    assert abs(u.seconds - 3.942) < 1e-9
+
+
+def test_bob_zero_cost():
+    """A session_costs of 0 is still recorded as 0.0, not None."""
+    from agent_cost_bench.usage import parse_bob_usage
+    u = parse_bob_usage(_bob_result(session_costs=0), "", Pricing())
+    assert u.cost_usd == 0.0
+
+
+def test_bob_no_pricing_config_required():
+    """Bob reports direct USD — no pricing fields are needed in Pricing()."""
+    from agent_cost_bench.usage import parse_bob_usage
+    u = parse_bob_usage(_bob_result(session_costs=0.10), "", Pricing())
+    assert u.cost_usd is not None
+
+
+def test_bob_missing_stats_returns_empty_usage():
+    """Malformed output (no stats block) returns an empty Usage."""
+    from agent_cost_bench.usage import parse_bob_usage
+    u = parse_bob_usage('{"type":"result","status":"error"}', "", Pricing())
+    assert u.cost_usd is None
+    assert u.seconds is None
+
+
+def test_bob_empty_output_returns_empty_usage():
+    """Completely empty stdout returns an empty Usage."""
+    from agent_cost_bench.usage import parse_bob_usage
+    u = parse_bob_usage("", "", Pricing())
+    assert u.cost_usd is None
+
+
+def test_bob_dispatch_via_parse_usage():
+    """parse_usage routes CostSource.BOB_JSON (inferred from binary name `bob`)."""
+    t = make_cli_target({
+        "name": "bob",
+        "cli_path": "bob",
+        "model_id": "claude-opus-4.8",
+    })
+    assert t.cost_source == CostSource.BOB_JSON   # inferred from cli_path
+    u = parse_usage(t, _bob_result(session_costs=0.055, duration_ms=5000), "")
+    assert abs(u.cost_usd - 0.055) < 1e-9
+    assert abs(u.seconds - 5.0) < 1e-9

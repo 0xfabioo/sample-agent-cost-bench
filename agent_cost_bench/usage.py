@@ -887,6 +887,58 @@ def parse_antigravity_usage(stdout: str, stderr: str, pricing: Pricing) -> Usage
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Bob CLI JSON (`bob -p "<prompt>"`)
+# ---------------------------------------------------------------------------
+
+
+def parse_bob_usage(stdout: str, stderr: str, pricing: Pricing) -> Usage:
+    """Parse the Bob CLI headless JSON result.
+
+    ``bob -p "<prompt>"`` prints a single JSON object to stdout::
+
+        {
+          "type": "result",
+          "timestamp": "2026-09-08T09:39:25.829Z",
+          "status": "success",
+          "stats": {
+            "task_id": "950a5f413d10f6521e9bb56b5ea5c923",
+            "duration_ms": 3942,
+            "session_costs": 0.04098400000000001,
+            "max_cost": 0,
+            "tool_calls": 1
+          },
+          "last_message": "..."
+        }
+
+    ``stats.session_costs`` is the direct USD cost for the session — no
+    per-token pricing config is required (analogous to Claude Code's
+    ``total_cost_usd``). ``stats.duration_ms`` is used for timing.
+
+    Returns an empty ``Usage()`` when no result object is found or the
+    invocation did not produce a ``type:result`` object (e.g. an error run).
+    """
+    objs = _find_json_objects(stdout) or _find_json_objects(stderr)
+    result_obj = None
+    for o in objs:
+        if o.get("type") == "result" or "stats" in o:
+            result_obj = o
+    if result_obj is None and objs:
+        result_obj = objs[-1]
+    if not result_obj:
+        return Usage()
+
+    stats = result_obj.get("stats") or {}
+    cost = stats.get("session_costs")
+    duration_ms = stats.get("duration_ms")
+    seconds = (duration_ms / 1000.0) if isinstance(duration_ms, (int, float)) else None
+
+    return Usage(
+        cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
+        seconds=seconds,
+    )
+
+
 def parse_devin_usage(pricing: Pricing, workspace: Path | None) -> Usage:
     """Parse the Devin CLI's ATIF conversation export for token usage.
 
@@ -1134,6 +1186,8 @@ def parse_usage(
         return parse_cursor_usage(stdout, stderr, p)
     if src == CostSource.ANTIGRAVITY_JSON:
         return parse_antigravity_usage(stdout, stderr, p)
+    if src == CostSource.BOB_JSON:
+        return parse_bob_usage(stdout, stderr, p)
     if src == CostSource.DEVIN_EXPORT:
         return parse_devin_usage(p, workspace)
     if src == CostSource.KAS_PROXY_METRICS:

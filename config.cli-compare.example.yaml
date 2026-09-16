@@ -57,36 +57,36 @@ comparison_label: Opus 4.8 (Kiro / Claude Code / Copilot / Cursor / Devin ) vs G
 
 runners:
   # ── Kiro CLI (claude-opus-4.8) ────────────────────────────────────────────
-  - name: kiro
-    display_name: "Kiro (claude-opus-4.8)"
-    cli_path: kiro-cli
-    model_id: claude-opus-4.8
-    pricing:
-      usd_per_credit: 0.04
-    cli_base_args: [chat, --no-interactive, --trust-all-tools,
-                    "--model={model}", "--effort={effort}"]
+  # - name: kiro
+  #   display_name: "Kiro (claude-opus-4.8)"
+  #   cli_path: kiro-cli
+  #   model_id: claude-opus-4.8
+  #   pricing:
+  #     usd_per_credit: 0.04
+  #   cli_base_args: [chat, --no-interactive, --trust-all-tools,
+  #                   "--model={model}", "--effort={effort}"]
 
   # ── Claude Code (claude-opus-4.8) ─────────────────────────────────────────
   # cost is read directly from --output-format json (total_cost_usd field)
-  - name: claude-code
-    display_name: "Claude Code (claude-opus-4.8)"
-    cli_path: claude
-    model_id: us.anthropic.claude-opus-4-8
-    cli_base_args: ["-p", "{prompt}", "--output-format", "json",
-                    "--model", "{model}", "--dangerously-skip-permissions",
-                    "--effort", "{effort}"]
+  # - name: claude-code
+  #   display_name: "Claude Code (claude-opus-4.8)"
+  #   cli_path: claude
+  #   model_id: us.anthropic.claude-opus-4-8
+  #   cli_base_args: ["-p", "{prompt}", "--output-format", "json",
+  #                   "--model", "{model}", "--dangerously-skip-permissions",
+  #                   "--effort", "{effort}"]
 
   # ── GitHub Copilot (claude-opus-4.8) ──────────────────────────────────────
   # No pricing config needed: cost comes from Copilot's AI-credit (AIU)
   # telemetry (1 AIU = $0.01), read from the JSON output. When no AIU data is
   # present, cost is reported as unknown rather than guessed.
-  - name: copilot
-    display_name: "GitHub Copilot (claude-opus-4.8)"
-    cli_path: copilot
-    model_id: claude-opus-4.8
-    cli_base_args: ["-p", "{prompt}", "--model", "{model}",
-                    "--allow-all-tools", "--output-format", "json",
-                    "--effort", "{effort}"]
+  # - name: copilot
+  #   display_name: "GitHub Copilot (claude-opus-4.8)"
+  #   cli_path: copilot
+  #   model_id: claude-opus-4.8
+  #   cli_base_args: ["-p", "{prompt}", "--model", "{model}",
+  #                   "--allow-all-tools", "--output-format", "json",
+  #                   "--effort", "{effort}"]
 
   # ── Cursor (claude-opus-4.8-thinking-max) ─────────────────────────────────
   # Cursor encodes effort/thinking as part of the model slug, not a separate
@@ -109,20 +109,20 @@ runners:
   #
   # Pricing: from https://cursor.com/docs/models-and-pricing (API pool)
   # Opus 4.8: Input $5/M, Cache Write $6.25/M, Cache Read $0.50/M, Output $25/M
-  - name: cursor
-    display_name: "Cursor (claude-opus-4.8)"
-    cli_path: agent
-    model_id: claude-opus-4-8
-    cost_source: cursor_json
-    pricing:
-      usd_per_input_token:        0.000005     # $5.00  / 1M (fresh input)
-      usd_per_cache_write_token:  0.00000625   # $6.25  / 1M (cache write)
-      usd_per_cached_input_token: 0.0000005    # $0.50  / 1M (cache read)
-      usd_per_output_token:       0.000025     # $25.00 / 1M
-    capabilities:
-      requires_pty: true
-    cli_base_args: ["-p", "{prompt}", "--trust","--yolo", "--output-format", "json",
-                    "--model", "{model}"]
+  # - name: cursor
+  #   display_name: "Cursor (claude-opus-4.8)"
+  #   cli_path: agent
+  #   model_id: claude-opus-4-8
+  #   cost_source: cursor_json
+  #   pricing:
+  #     usd_per_input_token:        0.000005     # $5.00  / 1M (fresh input)
+  #     usd_per_cache_write_token:  0.00000625   # $6.25  / 1M (cache write)
+  #     usd_per_cached_input_token: 0.0000005    # $0.50  / 1M (cache read)
+  #     usd_per_output_token:       0.000025     # $25.00 / 1M
+  #   capabilities:
+  #     requires_pty: true
+  #   cli_base_args: ["-p", "{prompt}", "--trust","--yolo", "--output-format", "json",
+  #                   "--model", "{model}"]
 
   # ── Antigravity (gemini) ──────────────────────────────────────────────────
   # `agy -p "<prompt>" --output-format json` prints a single JSON result object
@@ -165,14 +165,14 @@ runners:
   # cache-read rate, so usd_per_cached_input_token is left unset and cache reads
   # fall back to the full input rate; add it from the API pricing page (Gemini
   # cached input is typically 25% of the input rate) to avoid overstating cost.
-  - name: antigravity
-    display_name: "Antigravity (gemini-3.8-flash)"
-    cli_path: agy
-    model_id: gemini-3.8-flash   # base slug; harness appends the effort (-high/…)
-    cost_source: antigravity_json
-    pricing:
-      usd_per_input_token:  0.00000075   # $0.75 / 1M (fresh input)
-      usd_per_output_token: 0.00000375   # $3.75 / 1M
+  # - name: antigravity
+  #   display_name: "Antigravity (gemini-3.8-flash)"
+  #   cli_path: agy
+  #   model_id: gemini-3.8-flash   # base slug; harness appends the effort (-high/…)
+  #   cost_source: antigravity_json
+  #   pricing:
+  #     usd_per_input_token:  0.00000075   # $0.75 / 1M (fresh input)
+  #     usd_per_output_token: 0.00000375   # $3.75 / 1M
       # usd_per_cached_input_token:       # add from the Gemini API pricing page
     # IMPORTANT: agy ignores the process cwd and writes into its own managed
     # scratch dir (~/.gemini/antigravity-cli/...) unless the run workspace is
@@ -244,6 +244,30 @@ runners:
                     "--export", "devin-usage.json"]
     # Add "--respect-workspace-trust", "false" only if you cannot pre-trust
     # workspace_base interactively (see the trust note above).
+
+  # ── IBM Bob ──────────────────────────────────────────────────────────────────
+  # Bob is IBM's AI coding assistant. `bob -p "<prompt>"` runs headless and
+  # prints a single JSON object to stdout:
+  #
+  #   {"type":"result","status":"success","stats":{"duration_ms":3942,
+  #    "session_costs":0.041,"tool_calls":1},"last_message":"..."}
+  #
+  # Cost is read directly from `stats.session_costs` (USD) — no pricing
+  # config is required, analogous to Claude Code's `total_cost_usd`.
+  # cost_source is inferred automatically from the binary name `bob`.
+  #
+  # Authentication: `bob login` (or set BOB_API_KEY env var if supported).
+  # Model: set model_id to the Bob model you want to benchmark.
+  #
+  # Note: `bob run` is the headless subcommand. Run `bob run --help` for the
+  # full flag reference. Replace cli_base_args below once you have confirmed
+  # the exact flags for your Bob version.
+  - name: bob
+    display_name: "Bob (claude-opus-4.8)"
+    cli_path: bob
+    model_id: claude-opus-4.8
+    # No pricing block needed — cost comes directly from stats.session_costs.
+    cli_base_args: ["-p", "{prompt}"]
 
   # # ── OpenAI Codex (gpt-5.5) ────────────────────────────────────────────────
   # # Pricing reference: https://developers.openai.com/api/docs/pricing?latest-pricing=standard

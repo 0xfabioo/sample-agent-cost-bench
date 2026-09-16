@@ -14,7 +14,7 @@ Bring any model, any CLI, and any use case — a real GitHub repo with your own 
 
 The framework is designed to be flexible:
 
-- **Any CLI** — Kiro, Claude Code, GitHub Copilot, Cursor, OpenAI Codex, Antigravity, Devin - Currently supported CLI's.
+- **Any CLI** — Kiro, Claude Code, GitHub Copilot, Cursor, OpenAI Codex, Antigravity, Devin, Bob - Currently supported CLI's.
 - **Any model** — Anthropic (Claude), OpenAI (o-series, GPT-5.x) or anything your CLI exposes.
 - **Any use case** — greenfield tasks included out of the box, or bring your own GitHub repo (public or private). The framework clones it, hands it to the model, and verifies the result.
 - **Multiple verification options** — pytest, Docker containers, custom scorers, or LLM-judge rubrics. Pick the one that fits; no verification code is required for rubric-graded tasks.
@@ -138,6 +138,7 @@ export CURSOR_API_KEY=...        # Cursor (or use `cursor login`)
 export OPENAI_API_KEY=...        # Codex (or use `codex auth login`)
 # Antigravity: use `agy login`
 # Devin: use `devin auth login` (no env-var equivalent)
+# Bob: use `bob login`
 ```
 
 The harness inherits the parent shell's environment, so all CLIs pick up their keys automatically — no per-runner `env:` block needed.
@@ -626,6 +627,7 @@ writing a reward, the runner synthesizes one from the exit code.
 | `cursor` / `agent` | `-p --output-format json` → `usage` object with token counts |
 | `agy` / `antigravity` | `-p --output-format json` → `usage` object with token counts |
 | `devin` | `--export <file>` ATIF conversation export → `final_metrics` token counts |
+| `bob` | `-p "<prompt>"` → `stats.session_costs` (direct USD; no pricing config needed) |
 | Any + per-token pricing | Custom regex with `(?P<input>...)` / `(?P<output>...)` groups |
 
 
