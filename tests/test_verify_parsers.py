@@ -77,6 +77,38 @@ def test_missing_results_marks_not_ran(tmp_path):
     assert r.ran is False and r.total == 0 and r.score == 0.0
 
 
+def test_reward_file_float(tmp_path):
+    _write(tmp_path, "reward.txt", "0.75")
+    r = parse_results("reward-file", tmp_path, "", "", 0, None)
+    assert abs(r.score - 0.75) < 1e-6 and r.ran is True
+
+
+def test_reward_file_binary(tmp_path):
+    _write(tmp_path, "reward.txt", "1")
+    assert parse_results("reward-file", tmp_path, "", "", 0, None).score == 1.0
+    _write(tmp_path, "reward.txt", "0")
+    assert parse_results("reward-file", tmp_path, "", "", 1, None).score == 0.0
+
+
+def test_reward_file_pair(tmp_path):
+    _write(tmp_path, "reward.txt", "3/5")
+    r = parse_results("reward-file", tmp_path, "", "", 0, None)
+    assert (r.passed, r.total) == (3, 5)
+
+
+def test_reward_file_json(tmp_path):
+    _write(tmp_path, "reward.txt", '{"passed": 4, "total": 8}')
+    r = parse_results("reward-file", tmp_path, "", "", 0, None)
+    assert (r.passed, r.total) == (4, 8)
+    _write(tmp_path, "reward.txt", '{"reward": 0.5}')
+    assert abs(parse_results("reward-file", tmp_path, "", "", 0, None).score - 0.5) < 1e-6
+
+
+def test_reward_file_missing_marks_not_ran(tmp_path):
+    r = parse_results("reward-file", tmp_path, "", "", 1, None)
+    assert r.ran is False and r.score == 0.0
+
+
 def test_unknown_parser_raises(tmp_path):
     import pytest
     with pytest.raises(ValueError):

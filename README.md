@@ -307,6 +307,7 @@ agent-cost-bench model-compare list-tasks config.model-compare.example.yaml  # s
 agent-cost-bench report results/<run_id>.json                                # rebuild HTML
 agent-cost-bench new-task my-task                                            # scaffold (rubric)
 agent-cost-bench new-task my-task --with-tests                               # scaffold (pytest)
+agent-cost-bench import-tasks --type terminal-bench --path ~/tb/tasks        # import external tasks
 ```
 
 Reports (HTML + JSON) are written to `results/` and open automatically.
@@ -346,6 +347,8 @@ Tasks live under `tasks/`. Two types:
 Select tasks with `task_ids:` in your config. Omit it to run everything.
 
 > Rubric-graded tasks need `judge_model`. Docker tasks need Docker + prebuilt images.
+>
+> You can also bring in Terminal-Bench tasks as extra comparison tasks — see [Bring your own tasks](#bring-your-own-tasks-terminal-bench-21) below.
 > The seven high-complexity tasks (`event-sourcing-cqrs` through `platform-as-a-service`) are greenfield multi-file applications (7-16 files, 30-72 pytest scenarios each) that stress multi-file architecture and cross-cutting concerns; they take ~5-22 min per run versus under 2 min for the single-file tasks.
 
 ## How verification works
@@ -409,6 +412,144 @@ AGENT_COST_BENCH_RESULT: {"score": 0.7, "checkpoints": {...}, "summary": "..."}
 ### Pass threshold
 
 `functional_pass_threshold` in `task.yaml` sets the score needed for a PASS (default: 0.99). Lower it for rubric tasks that rarely need perfection.
+
+## Bring your own tasks (Terminal-Bench 2.1)
+
+Want more tasks to compare CLIs on than the ones bundled here? You can pull in tasks from
+[Terminal-Bench](https://github.com/harbor-framework/terminal-bench-2-1) and run your CLIs against them. The framework imports Terminal-Bench 2.x tasks (Harbor layout: `task.toml` +
+`instruction.md` + `environment/` + `tests/`; older 1.x layouts are handled too), converts each
+to a native fixture, and grades it with the task's **own** hidden test suite — giving you a pool
+of real, third-party tasks for the cost/quality comparison without authoring them yourself.
+
+> **This is "bring Terminal-Bench tasks into this framework," not "run the Terminal-Bench
+> benchmark."** The two harnesses execute differently, and that difference matters:
+>
+> - **Terminal-Bench** runs the agent *inside* the task's container, so the agent can install
+>   packages, build binaries, and start services that its tests then check.
+> - **This framework** runs each CLI on the *host* and copies only the files it produces (under
+>   `src/`) into a fresh container for grading. Anything the agent installs into its host
+>   environment does not reach the grading container.
+>
+> The practical consequence: tasks that only require the agent to **produce files** (transform
+> data, write a program, fix code) grade correctly and are great for comparing CLIs. Tasks that
+> require the agent to **mutate the container environment** (e.g. "install R", "build `pmars`
+> into `/usr/local/bin`", "run a web server") cannot be graded faithfully here — the framework
+> detects and skips those rather than scoring them as model failures. So treat Terminal-Bench
+> here as a *source of extra comparison tasks*, not as a way to reproduce Terminal-Bench scores.
+> If you need faithful Terminal-Bench leaderboard numbers, use Terminal-Bench's own harness.
+
+**Curated default.** Because a large share of the suite assumes in-container execution, a
+`terminal-bench` source with **no explicit `tasks:` filter** defaults to a small, curated set of
+tasks that have been confirmed to grade correctly under this host-agent model (rather than
+running all ~89 and reporting a wall of structural failures). Set `tasks:` explicitly to run any
+tasks you choose — the curated default only applies when you don't. The confirmed set lives in
+`agent_cost_bench/importers/terminal_bench.py` (`_TERMINAL_BENCH_SUPPORTED`) and grows as runs
+confirm more tasks are gradeable.
+
+**How grading is bridged.** The importer emits a Docker `verify:` block (`parser: reward-file`)
+that copies the model's `src/` into the task image, runs the task's own test script, and reads
+the reward it writes. The imported prompt instructs the model to place its solution under `src/`,
+and any input files the task references (e.g. `/app/data.txt`) are seeded into the workspace so
+the model can read them.
+
+### Option A — declare a task source in your config (imported at run time)
+
+Add a `task_sources:` list to either config schema. Tasks are converted the moment you run,
+staged under `<workspace_base>/.imported-tasks/`, and discovered like any other task.
+
+`path` can be a **local directory** or a **git URL**. When it is a git URL, the framework
+clones the repository into its own cache (`<workspace_base>/.repo_cache/`) on first use and
+imports from there — you don't have to download anything by hand:
+
+```yaml
+task_sources:
+  # Auto-cloned from GitHub — nothing to download first:
+  - type: terminal-bench
+    path: https://github.com/laude-institute/terminal-bench
+    ref: main                                 # branch, tag, or full 40-char commit SHA
+    subdir: tasks                             # repo subdirectory that holds the tasks
+    # tasks: [chess-best-move, write-compressor]  # optional: pick specific source task names.
+    #   Omit to use the curated harness-compatible default set (see above).
+    # token_env: GITHUB_TOKEN                 # for a PRIVATE repo over HTTPS (env var NAME)
+
+  # Or a local checkout (ref/subdir/depth/token_env are ignored for a local path):
+  - type: terminal-bench
+    path: ~/benchmarks/terminal-bench/tasks   # a task dir, or a directory of task dirs
+```
+
+Then run as usual — `agent-cost-bench cli-compare run config.yaml`. Imported ids are prefixed
+(`terminal-bench-<name>`), so you can still target them with `task_ids:` or `--task`.
+
+> **Task sources are exclusive.** When any enabled `task_sources` entry is present, the run uses
+> **only** the imported tasks — the repo's own `tasks/` tree is skipped — so an imported-task run
+> isn't diluted by the bundled sample tasks. Remove or disable the `task_sources` block
+> (`enabled: false`) to go back to running the local `tasks/`. `tasks_dir` is still read from the
+> config but ignored while a task source is active.
+>
+> With no `tasks:` filter, only the curated harness-compatible default set is imported (see the
+> "Curated default" note above). Set `tasks:` to override that and pick your own.
+
+#### Caveats for git task sources
+
+- **Verify the repo URL and `subdir`.** The framework imports whatever task directories it finds
+  under the cloned path; it does not validate that a given URL is the "official" benchmark. Point
+  `path` at the real repository and set `subdir` to the folder that actually holds the tasks
+  (Harbor layout). A wrong URL or `subdir` surfaces as "no tasks found," not as a download error.
+- **`git` must be installed and on `PATH`.** Cloning shells out to `git` (with a transport
+  allowlist and no interactive credential prompts). On Windows use [Git for Windows](https://git-scm.com/download/win).
+  This is the only external dependency the clone path needs.
+- **The clone is cached and not auto-refreshed.** Each URL + `ref` is cloned once into
+  `<workspace_base>/.repo_cache/<url_hash>/<ref>/` and reused on every later run — parallel runs
+  share a single fetch. It is **not** re-fetched automatically, so if `ref` is a moving branch
+  (e.g. `main`) that advances upstream, you keep getting the originally-cloned snapshot. Pin `ref`
+  to a full 40-char commit SHA for reproducibility. To force a fresh clone, delete the cache:
+  `rm -rf <workspace_base>/.repo_cache`.
+- **Windows filesystem notes.** The cache/clean-up logic is OS-agnostic and has been made
+  Windows-safe: publishing a freshly-cloned tree retries to ride out transient antivirus/indexer
+  file locks, and directory cleanup clears the read-only bit that git sets on objects under
+  `.git`. If a clone still fails to publish on Windows, an antivirus or search indexer is likely
+  holding a handle on the files — retry, or exclude your `workspace_base` directory from real-time
+  scanning. (These paths were validated by simulating the failure modes on POSIX; a real Windows
+  smoke test is the final confirmation.)
+
+### Option B — convert once into `tasks/` (inspect and edit the fixtures)
+
+```bash
+# Import every task from a directory of Terminal-Bench tasks
+agent-cost-bench import-tasks --type terminal-bench --path ~/terminal-bench/tasks
+
+# Import only named tasks
+agent-cost-bench import-tasks --type terminal-bench --path ~/tb/tasks \
+    --task hello-world --task fix-permissions
+
+# Import tasks into a custom root
+agent-cost-bench import-tasks --type terminal-bench --path ~/tb/tasks --into tasks
+
+# Import AND build the Docker images now (otherwise they build on first run)
+agent-cost-bench import-tasks --type terminal-bench --path ~/tb/tasks --build
+```
+
+Each import writes a native `tasks/<mode>/<id>/` fixture (a `task.yaml` plus the copied
+`verify/tests/`, the task's `environment/` build context, and the oracle solution under
+`reference/`). Tasks that ship a Dockerfile get their image built automatically on first
+run (see the Docker image note below).
+
+> **Docker image.** These tasks are graded in the source benchmark's own container. When the
+> source `task.toml`/manifest names a prebuilt `docker_image`, it is used as-is. When the task
+> ships only a `Dockerfile`, the importer copies its build context to `verify/environment/` and
+> records `verify.build_context` in the generated `task.yaml`. **The framework builds the image
+> automatically** the first time the task runs (and reuses it on later runs) — no manual build
+> step. You can also build eagerly at import time with `import-tasks --build`, or build it
+> yourself. If a build fails or the daemon is down, that task is reported as a harness error
+> (not a model failure) and the others still run.
+
+### Reward parsing
+
+Imported tasks score with the `reward-file` parser, which reads the reward the task's verifier
+writes (Harbor's convention is `/logs/verifier/reward.txt`). It accepts a float in `[0, 1]`
+(graduated reward), an integer `passed total` / `passed/total` pair, a binary `1`/`0`, or a
+small `{"reward": ...}` / `{"passed": .., "total": ..}` JSON object. If a task exits without
+writing a reward, the runner synthesizes one from the exit code.
 
 ## Supported CLIs and cost detection
 
