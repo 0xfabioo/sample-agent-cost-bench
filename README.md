@@ -46,6 +46,68 @@ pip install -e .            # installs the `agent-cost-bench` command
 pip install -e ".[dev]"     # optional: dev/test extras
 ```
 
+## Interactive runner (`run.sh`)
+
+If you'd rather not clone, install, and hand-write a config yourself, the repo ships a self-contained interactive runner that walks you through the whole thing. It's the fastest way to go from zero to a rendered cost comparison, and it runs **entirely on your machine**
+
+```bash
+./run.sh            # interactive, full flow
+```
+
+The script drives a `cli-compare` run through four steps:
+
+1. **Preflight** — checks for the tools it needs (`git`, `python3`, `curl`, and `npm` if you pick an npm-based CLI) and tells you exactly what's missing before doing anything.
+2. **Install** — clones the benchmark fresh into a timestamped per-run folder (so every run uses the latest `main`), creates an isolated virtualenv, installs `agent-cost-bench`, and installs the vendor CLIs for the runners you selected.
+3. **Configure** — lets you pick which CLIs to compare, queries each CLI for its own available models so you can choose from a live list, collects and caches API keys, handles CLIs that need an interactive login, and generates a valid `config.yaml` for you.
+4. **Run** — runs the benchmark on this host, writes the HTML/JSON report into a local results directory, and opens the report at the end.
+
+### Why use it
+
+- **No config authoring.** It generates a correct `cli-compare` config — including the fiddly per-CLI `cli_base_args`, pricing blocks, and the flags each CLI actually needs (e.g. Antigravity's `--add-dir`/`--print-timeout`) — so you don't have to copy an example and get the details right by hand.
+- **Guided model selection.** For each CLI it runs that CLI's own "list models" command and shows a numbered picker, falling back to a sensible default when a CLI can't list (not logged in, no list command). No guessing model slugs.
+- **Authentication handled for you.** It knows which CLIs use an env-var API key versus an interactive login, prompts only where a key applies, and offers to run the login command for the rest. Entered keys are cached (chmod 600) so you only type each one once.
+- **Fresh + reproducible.** Each run gets its own clone and venv, isolated from other runs, and records the exact commit it checked out.
+- **Safe by default.** Input for keys is hidden, cached secrets are masked in logs, and the `.env` cache is kept private. Keep that `.env` out of git.
+
+> **What the script prompts for vs. what it defaults.** `run.sh` only asks you to choose the **CLIs to compare**, a **model per CLI**, the global **effort**, and (optionally) a report **label**. Every other config key is written with a fixed default — it does **not** prompt for them. If you need to change any of these, edit the generated `config.yaml` (its path is printed during the run) and re-run with `--config <that file>`, or write your own config from `config.cli-compare.example.yaml`. The baked-in defaults are:
+>
+> | Config key | Default written by `run.sh` | What it means |
+> |------------|-----------------------------|---------------|
+> | `judge_cli_path` | `kiro-cli` | CLI used as the LLM judge for rubric-graded tasks (needs Kiro installed + authenticated) |
+> | `judge_model` | `claude-opus-4.8` | Model the judge uses to grade |
+> | `judge_weight` | `0.6` | Weight of the judge score in the blended result |
+> | `modes` | `["vibe"]` | cli-compare runs vibe tasks only |
+> | `task_ids` | *(empty)* | Runs **all** bundled tasks — including Docker-graded ones, which need a local Docker daemon |
+> | `concurrency` | `per_target` | Parallelism strategy |
+> | `timeout_minutes` | `20` | Per-task timeout |
+> | `repeats` | `1` | Runs each task once |
+> | `functional_pass_threshold` | `0.99` | Score needed to count as a PASS |
+> | `workspace_base` | `/tmp/agent-cost-bench-cli-compare` | Where per-task workspaces are created |
+> | `devin_permissions_file` | `tasks/devin/config.json` | Scoped Devin permission policy copied into each workspace |
+> | `output_dir` | `results` | Report directory inside the run's benchmark checkout (final reports are also copied to `acb-results/<runId>`) |
+> | `open_report` | `false` | The harness doesn't auto-open; `run.sh` opens the HTML itself unless `--no-open` |
+>
+> Note the empty `task_ids` means a plain run executes the **entire** bundled task suite, some of which require Docker. To run a subset, edit `task_ids:` in the generated config and re-run with `--config`.
+
+### Common flags
+
+```bash
+./run.sh --yes                  # accept defaults (Kiro + Claude Code, opus)
+./run.sh --skip-install         # reuse the most recent clone/venv, skip installs
+./run.sh --no-open              # don't open the report at the end
+./run.sh --config path.yaml     # use an existing config, skip all prompts
+./run.sh --no-save-keys         # don't cache entered API keys to .env
+./run.sh --label "Opus shootout" # set the report's comparison label
+./run.sh --effort high          # global reasoning effort: low|medium|high
+./run.sh --help                 # full usage
+```
+
+A single global `--effort` (default `high`) is applied across all CLIs — via the `{effort}` flag for CLIs that take one, or appended to the model slug for the rest. Per-task effort in a `task.yaml` still overrides it.
+
+You can also point environment variables at custom locations: `BENCH_REPO_REF` (branch/tag/SHA to clone), `BENCH_HOME` (workspace root), `RESULTS_DIR` (where reports land), and `ACB_ENV_FILE` (the cached-keys file).
+
+> **Cost warning applies here too.** The runner benchmarks against your own subscriptions and consumes credits/tokens/premium requests. It defaults to running all bundled tasks.
+
 ## Quick start
 
 ### Step 1: Copy an example config
@@ -61,6 +123,8 @@ cp config.model-compare.example.yaml config.model-compare.yaml
 ```
 
 Then edit your copy with your specific paths, model IDs, and pricing rates (see below).
+
+> **Prefer not to hand-write a config?** The interactive runner script does all of steps 1–3 for you — see [Interactive runner](#interactive-runner-runsh) below.
 
 ### Step 2: Set up authentication
 
