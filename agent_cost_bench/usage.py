@@ -911,12 +911,17 @@ def parse_bob_usage(stdout: str, stderr: str, pricing: Pricing) -> Usage:
           "last_message": "..."
         }
 
-    ``stats.session_costs`` is the direct USD cost for the session — no
-    per-token pricing config is required (analogous to Claude Code's
-    ``total_cost_usd``). ``stats.duration_ms`` is used for timing.
+    ``stats.session_costs`` is in **Bobcoins** (IBM's billing unit).
+    1 Bobcoin = $0.50 USD (Pro/Ultra plan rate). USD cost is derived by
+    multiplying by ``pricing.usd_per_credit`` — the same pattern as
+    Kiro's credit-based billing. Configure the rate in the runner's
+    ``pricing`` block::
 
-    Returns an empty ``Usage()`` when no result object is found or the
-    invocation did not produce a ``type:result`` object (e.g. an error run).
+        pricing:
+          usd_per_credit: 0.50   # 1 Bobcoin = $0.50 USD
+
+    ``stats.duration_ms`` is used for timing. Returns an empty ``Usage()``
+    when no result object is found.
     """
     objs = _find_json_objects(stdout) or _find_json_objects(stderr)
     result_obj = None
@@ -929,13 +934,18 @@ def parse_bob_usage(stdout: str, stderr: str, pricing: Pricing) -> Usage:
         return Usage()
 
     stats = result_obj.get("stats") or {}
-    cost = stats.get("session_costs")
+    bobcoins = stats.get("session_costs")
     duration_ms = stats.get("duration_ms")
     seconds = (duration_ms / 1000.0) if isinstance(duration_ms, (int, float)) else None
 
+    cost = None
+    if isinstance(bobcoins, (int, float)) and pricing.usd_per_credit is not None:
+        cost = bobcoins * pricing.usd_per_credit
+
     return Usage(
-        cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
+        cost_usd=cost,
         seconds=seconds,
+        raw_credits=float(bobcoins) if isinstance(bobcoins, (int, float)) else None,
     )
 
 

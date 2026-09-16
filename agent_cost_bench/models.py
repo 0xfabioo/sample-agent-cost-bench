@@ -103,7 +103,7 @@ class CostSource(str, Enum):
     ANTIGRAVITY_JSON = "antigravity_json"  # parse `agy -p --output-format json` result object
     DEVIN_EXPORT = "devin_export"        # parse `devin -p --export <file>` ATIF final_metrics
     OPENCODE_JSON = "opencode_json"      # parse `opencode run --format json` step_finish events
-    BOB_JSON = "bob_json"                # parse `bob -p "<prompt>"` result object -> session_costs USD
+    BOB_JSON = "bob_json"                # parse `bob -p "<prompt>"` result object → session_costs Bobcoins × usd_per_credit
     TOKENS = "tokens"                    # parse token counts via regex, price per-token
     PREMIUM_REQUEST = "premium_request"  # fixed N premium/credit requests per run × price
     KAS_PROXY_METRICS = "kas_proxy_metrics"  # read kas-proxy's metrics.jsonl, correlated by run_id
@@ -122,8 +122,9 @@ class Pricing(BaseModel):
     Only the fields relevant to a target's ``cost_source`` are used:
       - kiro_credits      -> usd_per_credit
       - claude_json       -> (none; CLI reports total_cost_usd directly)
-      - bob_json          -> (none; CLI reports session_costs USD directly in the
-                             result JSON; no pricing config required)
+      - bob_json          -> usd_per_credit (1 Bobcoin = $0.50 USD by default;
+                             session_costs is in Bobcoins, multiplied by
+                             usd_per_credit to get USD — same pattern as kiro_credits)
       - copilot_json      -> usd_per_premium_request (fallback) and/or token rates
       - codex_json        -> usd_per_input_token + usd_per_output_token + usd_per_reasoning_token
       - cursor_json       -> usd_per_input_token + usd_per_cached_input_token

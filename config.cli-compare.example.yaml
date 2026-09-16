@@ -252,11 +252,12 @@ runners:
   #   {"type":"result","status":"success","stats":{"duration_ms":3942,
   #    "session_costs":0.041,"tool_calls":1},"last_message":"..."}
   #
-  # Cost is read directly from `stats.session_costs` (USD) — no pricing
-  # config is required, analogous to Claude Code's `total_cost_usd`.
+  # `stats.session_costs` is in Bobcoins (IBM's billing unit).
+  # 1 Bobcoin = $0.50 USD (individual Pro/Ultra plan rate; verify against
+  # your plan at https://ibm.com/products/ibm-bob).
   # cost_source is inferred automatically from the binary name `bob`.
   #
-  # Authentication: `bob login` (or set BOB_API_KEY env var if supported).
+  # Authentication: `bob login`
   # Model: set model_id to the Bob model you want to benchmark.
   #
   # Note: `bob run` is the headless subcommand. Run `bob run --help` for the
@@ -266,7 +267,8 @@ runners:
     display_name: "Bob (claude-opus-4.8)"
     cli_path: bob
     model_id: claude-opus-4.8
-    # No pricing block needed — cost comes directly from stats.session_costs.
+    pricing:
+      usd_per_credit: 0.50   # 1 Bobcoin = $0.50 USD — verify for your plan
     cli_base_args: ["-p", "{prompt}"]
 
   # # ── OpenAI Codex (gpt-5.5) ────────────────────────────────────────────────

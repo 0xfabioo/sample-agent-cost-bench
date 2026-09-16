@@ -853,50 +853,59 @@ def _bob_result(
 
 
 def test_bob_cost_and_duration():
-    """session_costs maps to cost_usd; duration_ms maps to seconds."""
+    """session_costs (Bobcoins) × usd_per_credit → cost_usd; duration_ms → seconds."""
     from agent_cost_bench.usage import parse_bob_usage
-    u = parse_bob_usage(_bob_result(session_costs=0.04098, duration_ms=3942), "", Pricing())
-    assert abs(u.cost_usd - 0.04098) < 1e-9
+    # 0.04098 Bobcoins × $0.50/Bobcoin = $0.02049 USD
+    u = parse_bob_usage(_bob_result(session_costs=0.04098, duration_ms=3942), "",
+                        Pricing(usd_per_credit=0.50))
+    assert abs(u.raw_credits - 0.04098) < 1e-9
+    assert abs(u.cost_usd - 0.04098 * 0.50) < 1e-9
     assert abs(u.seconds - 3.942) < 1e-9
 
 
-def test_bob_zero_cost():
-    """A session_costs of 0 is still recorded as 0.0, not None."""
-    from agent_cost_bench.usage import parse_bob_usage
-    u = parse_bob_usage(_bob_result(session_costs=0), "", Pricing())
-    assert u.cost_usd == 0.0
-
-
-def test_bob_no_pricing_config_required():
-    """Bob reports direct USD — no pricing fields are needed in Pricing()."""
+def test_bob_no_pricing_returns_none_cost():
+    """Without usd_per_credit configured, cost_usd is None but raw_credits is set."""
     from agent_cost_bench.usage import parse_bob_usage
     u = parse_bob_usage(_bob_result(session_costs=0.10), "", Pricing())
-    assert u.cost_usd is not None
+    assert u.cost_usd is None
+    assert abs(u.raw_credits - 0.10) < 1e-9
+
+
+def test_bob_zero_bobcoins():
+    """session_costs of 0 records raw_credits=0.0; cost_usd=0.0 when rate is set."""
+    from agent_cost_bench.usage import parse_bob_usage
+    u = parse_bob_usage(_bob_result(session_costs=0), "", Pricing(usd_per_credit=0.50))
+    assert u.raw_credits == 0.0
+    assert u.cost_usd == 0.0
 
 
 def test_bob_missing_stats_returns_empty_usage():
     """Malformed output (no stats block) returns an empty Usage."""
     from agent_cost_bench.usage import parse_bob_usage
-    u = parse_bob_usage('{"type":"result","status":"error"}', "", Pricing())
+    u = parse_bob_usage('{"type":"result","status":"error"}', "", Pricing(usd_per_credit=0.50))
     assert u.cost_usd is None
+    assert u.raw_credits is None
     assert u.seconds is None
 
 
 def test_bob_empty_output_returns_empty_usage():
     """Completely empty stdout returns an empty Usage."""
     from agent_cost_bench.usage import parse_bob_usage
-    u = parse_bob_usage("", "", Pricing())
+    u = parse_bob_usage("", "", Pricing(usd_per_credit=0.50))
     assert u.cost_usd is None
 
 
 def test_bob_dispatch_via_parse_usage():
-    """parse_usage routes CostSource.BOB_JSON (inferred from binary name `bob`)."""
+    """parse_usage routes CostSource.BOB_JSON (inferred from binary name `bob`);
+    Bobcoins are multiplied by usd_per_credit to produce cost_usd."""
     t = make_cli_target({
         "name": "bob",
         "cli_path": "bob",
         "model_id": "claude-opus-4.8",
+        "pricing": {"usd_per_credit": 0.50},
     })
     assert t.cost_source == CostSource.BOB_JSON   # inferred from cli_path
-    u = parse_usage(t, _bob_result(session_costs=0.055, duration_ms=5000), "")
-    assert abs(u.cost_usd - 0.055) < 1e-9
+    u = parse_usage(t, _bob_result(session_costs=0.10, duration_ms=5000), "")
+    assert abs(u.raw_credits - 0.10) < 1e-9
+    assert abs(u.cost_usd - 0.10 * 0.50) < 1e-9
     assert abs(u.seconds - 5.0) < 1e-9

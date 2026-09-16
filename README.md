@@ -627,7 +627,7 @@ writing a reward, the runner synthesizes one from the exit code.
 | `cursor` / `agent` | `-p --output-format json` → `usage` object with token counts |
 | `agy` / `antigravity` | `-p --output-format json` → `usage` object with token counts |
 | `devin` | `--export <file>` ATIF conversation export → `final_metrics` token counts |
-| `bob` | `-p "<prompt>"` → `stats.session_costs` (direct USD; no pricing config needed) |
+| `bob` | `-p "<prompt>"` → `stats.session_costs` Bobcoins × `usd_per_credit` ($0.50/Bobcoin) |
 | Any + per-token pricing | Custom regex with `(?P<input>...)` / `(?P<output>...)` groups |
 
 
