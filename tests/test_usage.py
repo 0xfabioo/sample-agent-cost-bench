@@ -14,6 +14,7 @@ from agent_cost_bench.usage import (
     parse_copilot_usage,
     parse_devin_usage,
     parse_kiro_usage,
+    parse_pi_usage,
     parse_token_regex_usage,
     parse_usage,
 )
@@ -824,3 +825,186 @@ def test_antigravity_dispatch_via_parse_usage():
     assert u.output_tokens == 300
     expected = 2000 * 0.00000125 + 1000 * 0.0000003125 + 300 * 0.00001
     assert abs(u.cost_usd - expected) < 1e-12
+
+
+# ---------------------------------------------------------------------------
+# pi_json cost source (`pi -p --mode json`)
+# ---------------------------------------------------------------------------
+
+
+def _pi_usage(inp, out, cache_read=0, cache_write=0, cost_total=None):
+    """Build a pi `usage` block; omit `cost` entirely when cost_total is None."""
+    usage = {
+        "input": inp,
+        "output": out,
+        "cacheRead": cache_read,
+        "cacheWrite": cache_write,
+        "totalTokens": inp + out + cache_read + cache_write,
+    }
+    if cost_total is not None:
+        usage["cost"] = {
+            "input": 0.0, "output": 0.0, "cacheRead": 0.0,
+            "cacheWrite": 0.0, "total": cost_total,
+        }
+    return usage
+
+
+def _pi_stream(turns, *, timestamps=None, include_agent_end=True) -> str:
+    """Serialize a pi `--mode json` JSONL stream from a list of turn usages.
+
+    Each turn emits the `message_end` + `turn_end` pair a real run produces, so
+    the tests also prove `message_end` is not double-counted.
+    """
+    lines = []
+    msgs = []
+    for i, usage in enumerate(turns):
+        ts = (timestamps or [1789580503571 + i * 1000 for i in range(len(turns))])[i]
+        msg = {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "api": "bedrock-converse-stream",
+            "provider": "amazon-bedrock",
+            "model": "global.anthropic.claude-sonnet-5",
+            "usage": usage,
+            "stopReason": "stop",
+            "timestamp": ts,
+        }
+        msgs.append(msg)
+        lines.append(json.dumps({"type": "turn_start"}))
+        lines.append(json.dumps({"type": "message_end", "message": msg}))
+        lines.append(json.dumps({"type": "turn_end", "message": msg, "toolResults": []}))
+    if include_agent_end:
+        lines.append(json.dumps({"type": "agent_end", "messages": msgs, "willRetry": False}))
+    lines.append(json.dumps({"type": "agent_settled"}))
+    return "\n".join(lines) + "\n"
+
+
+def test_pi_prefers_reported_cost_and_sums_turns():
+    """pi prices each turn itself, so cost is the sum of the reported totals —
+    no pricing config required. message_end must not be counted twice."""
+    stdout = _pi_stream([
+        _pi_usage(3, 70, cache_read=0, cache_write=6512, cost_total=0.025479),
+        _pi_usage(1, 16, cache_read=6512, cache_write=91, cost_total=0.00253785),
+    ])
+    u = parse_pi_usage(stdout, "", Pricing())
+    assert abs(u.cost_usd - (0.025479 + 0.00253785)) < 1e-12
+    # Total input processed = fresh input + cache reads + cache writes.
+    assert u.input_tokens == (3 + 0 + 6512) + (1 + 6512 + 91)
+    assert u.cached_input_tokens == 6512 + 6512 + 91
+    assert u.output_tokens == 70 + 16
+    assert abs(u.seconds - 1.0) < 1e-9  # timestamp span, ms → s
+
+
+def test_pi_reported_cost_wins_over_configured_rates():
+    """Configured per-token rates are a fallback only — never override the
+    cost the CLI reports (which comes from its own model catalog)."""
+    stdout = _pi_stream([_pi_usage(1000, 200, cache_read=5000, cost_total=0.5)])
+    u = parse_pi_usage(
+        stdout, "",
+        Pricing(usd_per_input_token=0.1, usd_per_output_token=0.1),
+    )
+    assert abs(u.cost_usd - 0.5) < 1e-12
+
+
+def test_pi_falls_back_to_token_pricing_when_no_cost_reported():
+    """An unpriced model reports no `cost` block; per-token rates fill the gap.
+    cacheRead and cacheWrite are billed at their own rates."""
+    stdout = _pi_stream([_pi_usage(1000, 200, cache_read=5000, cache_write=800)])
+    pricing = Pricing(
+        usd_per_input_token=0.000002,          # $2.00 / 1M
+        usd_per_cached_input_token=0.0000002,  # $0.20 / 1M
+        usd_per_cache_write_token=0.0000025,   # $2.50 / 1M
+        usd_per_output_token=0.00001,          # $10.00 / 1M
+    )
+    u = parse_pi_usage(stdout, "", pricing)
+    expected = (
+        1000 * 0.000002 + 5000 * 0.0000002 + 800 * 0.0000025 + 200 * 0.00001
+    )
+    assert abs(u.cost_usd - expected) < 1e-12
+
+
+def test_pi_no_cost_and_no_pricing_returns_tokens_only():
+    stdout = _pi_stream([_pi_usage(1000, 200, cache_read=300)])
+    u = parse_pi_usage(stdout, "", Pricing())
+    assert u.cost_usd is None
+    assert u.input_tokens == 1300
+    assert u.cached_input_tokens == 300
+    assert u.output_tokens == 200
+
+
+def test_pi_zero_cost_with_real_tokens_is_not_trusted():
+    """A reported cost of exactly 0 alongside real token usage means the route
+    priced nothing, not that the turn was free — fall back to configured rates
+    rather than publishing $0.00."""
+    stdout = _pi_stream([_pi_usage(1000, 200, cache_read=300, cost_total=0.0)])
+    pricing = Pricing(usd_per_input_token=0.000004, usd_per_output_token=0.00002)
+    u = parse_pi_usage(stdout, "", pricing)
+    expected = 1000 * 0.000004 + 300 * 0.000004 + 200 * 0.00002
+    assert abs(u.cost_usd - expected) < 1e-12
+    # …and with no rates configured it is unknown, NOT zero.
+    assert parse_pi_usage(stdout, "", Pricing()).cost_usd is None
+
+
+def test_pi_failed_turn_zero_tokens_zero_cost_is_genuinely_free():
+    """Bedrock rejecting the request emits stopReason:"error" with all-zero
+    usage AND all-zero cost. Nothing was billed, so $0.00 is the right answer."""
+    stdout = _pi_stream([_pi_usage(0, 0, cost_total=0.0)])
+    u = parse_pi_usage(stdout, "", Pricing())
+    assert u.cost_usd == 0.0
+    assert u.input_tokens is None
+    assert u.output_tokens is None
+
+
+def test_pi_falls_back_to_agent_end_when_no_turn_end():
+    """A run killed mid-turn has no turn_end; the agent_end summary is used."""
+    msg = {
+        "role": "assistant",
+        "usage": _pi_usage(10, 20, cost_total=0.001),
+        "timestamp": 1789580503571,
+    }
+    stdout = "\n".join([
+        json.dumps({"type": "turn_start"}),
+        json.dumps({"type": "agent_end", "messages": [
+            {"role": "user", "content": [], "timestamp": 1789580503000},
+            msg,
+        ], "willRetry": False}),
+    ])
+    u = parse_pi_usage(stdout, "", Pricing())
+    assert abs(u.cost_usd - 0.001) < 1e-12
+    assert u.output_tokens == 20
+
+
+def test_pi_empty_output_returns_empty_usage():
+    u = parse_pi_usage("", "", Pricing())
+    assert u.cost_usd is None
+    assert u.input_tokens is None
+    assert u.output_tokens is None
+
+
+def test_pi_ignores_unrelated_events():
+    """Streaming message_update events carry zeroed usage and no turn data —
+    they must not be mistaken for a turn."""
+    stdout = "\n".join([
+        json.dumps({"type": "message_update", "usage": _pi_usage(0, 0, cost_total=0.0),
+                    "assistantMessageEvent": {"type": "text_delta", "delta": "hi"}}),
+        json.dumps({"type": "agent_settled"}),
+    ])
+    u = parse_pi_usage(stdout, "", Pricing())
+    assert u.cost_usd is None
+    assert u.input_tokens is None
+
+
+def test_pi_dispatch_via_parse_usage():
+    """parse_usage routes CostSource.PI_JSON (inferred from the `pi` binary)."""
+    stdout = _pi_stream([_pi_usage(2000, 300, cache_read=1000, cost_total=0.0123)])
+    t = make_cli_target({
+        "name": "pi",
+        "cli_path": "pi",
+        "model_id": "global.anthropic.claude-sonnet-5",
+    })
+    assert t.cost_source == CostSource.PI_JSON  # inferred from cli_path
+    u = parse_usage(t, stdout, "")
+    assert abs(u.cost_usd - 0.0123) < 1e-12
+    assert u.input_tokens == 3000
+    assert u.cached_input_tokens == 1000
+    assert u.output_tokens == 300

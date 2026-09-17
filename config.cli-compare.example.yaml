@@ -13,6 +13,10 @@
 #   codex auth login                 # Codex (or export OPENAI_API_KEY)
 #   agy login                        # Antigravity
 #   devin auth login                 # Devin
+#   pi auth check --provider <name> --json
+#                                    # pi (uses the PROVIDER's own credentials —
+#                                    #   AWS creds for amazon-bedrock, etc.;
+#                                    #   expect "status":"ready")
 #
 # The harness inherits the parent shell's environment, so all CLIs pick up
 # their keys automatically — no per-runner `env:` block needed.
@@ -44,6 +48,7 @@
 #   cursor           → cursor_json
 #   agy / antigravity → antigravity_json
 #   devin            → devin_export
+#   pi               → pi_json
 # You can still set it explicitly if needed, but in most cases it's not required.
 
 comparison_label: Opus 4.8 (Kiro / Claude Code / Copilot / Cursor / Devin ) vs Gemini 3.8 Flash in Antigravity)
@@ -243,6 +248,49 @@ runners:
                     "--export", "devin-usage.json"]
     # Add "--respect-workspace-trust", "false" only if you cannot pre-trust
     # workspace_base interactively (see the trust note above).
+
+  # ── pi (bring-your-own-provider) ──────────────────────────────────────────
+  # `pi -p --mode json` streams JSON Lines; every `turn_end` event carries a
+  # `usage` block with token counts AND a USD `cost` that pi computes itself
+  # from its bundled model catalog:
+  #
+  #   {"type":"turn_end","message":{"provider":"amazon-bedrock",
+  #     "model":"global.anthropic.claude-sonnet-5",
+  #     "usage":{"input":3,"output":70,"cacheRead":0,"cacheWrite":6512,
+  #       "cost":{"input":0.000009,"output":0.00105,"cacheRead":0,
+  #               "cacheWrite":0.02442,"total":0.025479}}}}
+  #
+  # The harness sums cost.total across every turn, so NO pricing block is
+  # needed — same as Claude Code. Per-token rates below are optional and used
+  # only as a fallback for a model the catalog does not price.
+  #
+  # Token semantics: `input` is the FRESH (non-cached) prompt slice, reported
+  # next to cacheRead/cacheWrite, so total input = input + cacheRead + cacheWrite.
+  #
+  # Flags:
+  #   --provider   pi defaults to `google`. Pass the provider you actually have
+  #                credentials for or the first turn fails. Verify with
+  #                `pi auth check --provider amazon-bedrock --json`
+  #                ("status":"ready") and list ids with `pi --list-models`.
+  #                A combined form also works: --model provider/model-id.
+  #   --thinking   pi takes the reasoning level as a FLAG (off/minimal/low/
+  #                medium/high/xhigh/max), so {effort} maps straight through —
+  #                no model-slug suffix games as with Cursor/Devin/Antigravity.
+  #   --no-session keeps each benchmark run stateless (no ~/.pi session file).
+  #   --no-approve ignores project-local pi config/extensions/skills, so a
+  #                cloned brownfield repo can't influence the run.
+  # -p implies non-interactive and enables the built-in read/write/edit/bash
+  # tools without approval prompts, so there is no "skip permissions" flag to
+  # pass. pi writes into the process cwd, so files land in the run workspace
+  # with no --add-dir equivalent needed.
+  - name: pi
+    display_name: "pi (claude-sonnet-5)"
+    cli_path: pi
+    model_id: global.anthropic.claude-sonnet-5
+    cli_base_args: ["-p", "--mode", "json",
+                    "--provider", "amazon-bedrock", "--model", "{model}",
+                    "--thinking", "{effort}",
+                    "--no-session", "--no-approve", "{prompt}"]
 
   # # ── OpenAI Codex (gpt-5.5) ────────────────────────────────────────────────
   # # Pricing reference: https://developers.openai.com/api/docs/pricing?latest-pricing=standard

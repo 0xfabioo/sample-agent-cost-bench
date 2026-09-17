@@ -14,7 +14,7 @@ Bring any model, any CLI, and any use case — a real GitHub repo with your own 
 
 The framework is designed to be flexible:
 
-- **Any CLI** — Kiro, Claude Code, GitHub Copilot, Cursor, OpenAI Codex, Antigravity, Devin - Currently supported CLI's.
+- **Any CLI** — Kiro, Claude Code, GitHub Copilot, Cursor, OpenAI Codex, Antigravity, Devin, pi - Currently supported CLI's.
 - **Any model** — Anthropic (Claude), OpenAI (o-series, GPT-5.x) or anything your CLI exposes.
 - **Any use case** — greenfield tasks included out of the box, or bring your own GitHub repo (public or private). The framework clones it, hands it to the model, and verifies the result.
 - **Multiple verification options** — pytest, Docker containers, custom scorers, or LLM-judge rubrics. Pick the one that fits; no verification code is required for rubric-graded tasks.
@@ -25,7 +25,7 @@ Cost is always reported two ways: USD and native units (credits / AI Credits / t
 
 - **Python 3.10+**
 - **The coding CLI(s) you want to benchmark**, installed and logged in:
-  - `cli-compare`: the CLIs you list as runners (e.g. `kiro-cli`, `claude`, `copilot`, `agent`, `codex`, `agy`, `devin`)
+  - `cli-compare`: the CLIs you list as runners (e.g. `kiro-cli`, `claude`, `copilot`, `agent`, `codex`, `agy`, `devin`, `pi`)
   - `model-compare`: the Kiro CLI
 - **Docker** — only if you run the multi-language tasks (C#/.NET, Java,
   TypeScript, Terraform, Helm). Build images once with `./tasks/docker/build-images.sh`.
@@ -138,6 +138,9 @@ export CURSOR_API_KEY=...        # Cursor (or use `cursor login`)
 export OPENAI_API_KEY=...        # Codex (or use `codex auth login`)
 # Antigravity: use `agy login`
 # Devin: use `devin auth login` (no env-var equivalent)
+# pi: reads its provider's own credentials (e.g. AWS credentials for
+#     amazon-bedrock, ANTHROPIC_API_KEY / OPENAI_API_KEY for those providers).
+#     Verify with: pi auth check --provider <name> --json
 ```
 
 The harness inherits the parent shell's environment, so all CLIs pick up their keys automatically — no per-runner `env:` block needed.
@@ -157,6 +160,7 @@ Pricing rates are volatile and change over time. Check each vendor's current pri
 | **OpenAI Codex** | Token-level rates (see below) | [platform.openai.com/docs/pricing](https://platform.openai.com/docs/pricing) |
 | **Antigravity** | Token-level rates (see below) | Verify the per-token rates for your chosen `agy` model |
 | **Devin** | Token-level rates (see below) | `devin models list` prints per-MTok rates per model slug |
+| **pi** | No pricing config needed — prices each turn from its bundled model catalog and reports USD | `pi --list-models` shows the catalog; token rates may be supplied as a fallback for unpriced models |
 
 #### Token-level pricing (Cursor, Codex, and Devin)
 
@@ -311,6 +315,39 @@ The policy allows the shell, which makes that deny list a speed bump rather than
 Print mode cannot display Devin's interactive workspace-trust prompt and aborts in an untrusted directory. Trust is inherited by child directories, so run `devin` once interactively in your `workspace_base` and approve it — every per-run workspace created underneath is then trusted, and no flag is needed. Prefer this to `--respect-workspace-trust false`, which turns the check off for the whole run; add the flag only where nobody can approve interactively, such as CI.
 
 > Do **not** point Devin's `--config` flag at a file you intend to commit: the CLI writes session state (including your `org_id`) back into it.
+
+#### pi specifics
+
+The `pi` coding agent is a bring-your-own-provider CLI: it talks to whichever provider you have credentials for (Amazon Bedrock, Anthropic, OpenAI, …) and prices each turn itself from a bundled model catalog. `pi -p --mode json` streams JSON Lines, and every `turn_end` event carries both token counts and a USD cost:
+
+```json
+{"type":"turn_end","message":{"provider":"amazon-bedrock",
+  "model":"global.anthropic.claude-sonnet-5",
+  "usage":{"input":3,"output":70,"cacheRead":0,"cacheWrite":6512,
+    "cost":{"input":0.000009,"output":0.00105,"cacheRead":0,
+            "cacheWrite":0.02442,"total":0.025479}}}}
+```
+
+The harness sums `cost.total` across every `turn_end`, so **no pricing block is required** — the same arrangement as Claude Code. Per-token rates are honoured only as a fallback for a model the catalog does not price. `usage.input` is the fresh, non-cached prompt slice, reported alongside `cacheRead` / `cacheWrite`, so total input is the sum of the three.
+
+```yaml
+- name: pi
+  display_name: "pi (claude-sonnet-5)"
+  cli_path: pi
+  model_id: global.anthropic.claude-sonnet-5
+  cli_base_args: ["-p", "--mode", "json",
+                  "--provider", "amazon-bedrock", "--model", "{model}",
+                  "--thinking", "{effort}",
+                  "--no-session", "--no-approve", "{prompt}"]
+```
+
+Notes on the flags:
+
+- **`--provider`** — `pi`'s default provider is `google`, so pass the provider you are actually authenticated against or the run fails at the first turn. Check readiness with `pi auth check --provider amazon-bedrock --json` (expect `"status":"ready"`), and list the exact model ids with `pi --list-models`. Alternatively encode both in one value: `--model amazon-bedrock/global.anthropic.claude-sonnet-5`.
+- **`--thinking {effort}`** — `pi` takes the reasoning level as a flag (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), which lines up with the task's `effort` value directly. No model-slug suffix games as with Cursor/Devin/Antigravity.
+- **`--no-session`** — keeps each benchmark run stateless instead of appending to `~/.pi` session storage.
+- **`--no-approve`** — ignores project-local `pi` config, extensions, and skills found in the workspace. Worth keeping for a brownfield task that clones a repo you do not control: without it, files in the cloned tree could influence the run.
+- **`-p` implies non-interactive**, and built-in `read`/`write`/`edit`/`bash` tools are enabled without an approval prompt in this mode, so no "dangerously skip permissions" equivalent is needed. `pi` writes into the process working directory, so files land in the run workspace with no `--add-dir` equivalent required.
 
 ### model-compare — same CLI, different models
 
@@ -626,6 +663,7 @@ writing a reward, the runner synthesizes one from the exit code.
 | `cursor` / `agent` | `-p --output-format json` → `usage` object with token counts |
 | `agy` / `antigravity` | `-p --output-format json` → `usage` object with token counts |
 | `devin` | `--export <file>` ATIF conversation export → `final_metrics` token counts |
+| `pi` | `-p --mode json` JSONL → `turn_end` `usage.cost.total` (USD, summed over turns) |
 | Any + per-token pricing | Custom regex with `(?P<input>...)` / `(?P<output>...)` groups |
 
 

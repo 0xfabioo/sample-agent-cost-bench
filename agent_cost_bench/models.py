@@ -102,6 +102,7 @@ class CostSource(str, Enum):
     CURSOR_JSON = "cursor_json"          # parse `cursor -p --output-format json` result event
     ANTIGRAVITY_JSON = "antigravity_json"  # parse `agy -p --output-format json` result object
     DEVIN_EXPORT = "devin_export"        # parse `devin -p --export <file>` ATIF final_metrics
+    PI_JSON = "pi_json"                  # parse `pi -p --mode json` JSONL turn_end usage/cost
     TOKENS = "tokens"                    # parse token counts via regex, price per-token
     PREMIUM_REQUEST = "premium_request"  # fixed N premium/credit requests per run × price
     KAS_PROXY_METRICS = "kas_proxy_metrics"  # read kas-proxy's metrics.jsonl, correlated by run_id
@@ -128,6 +129,9 @@ class Pricing(BaseModel):
                              + usd_per_output_token
       - devin_export      -> usd_per_input_token + usd_per_cached_input_token
                              + usd_per_output_token
+      - pi_json           -> (none; the CLI reports a USD cost per turn from its
+                             own model catalog. Optional token rates are used
+                             only as a fallback when that cost is absent.)
       - tokens            -> usd_per_input_token + usd_per_output_token
       - premium_request   -> usd_per_premium_request
       - kas_proxy_metrics -> kas_metrics_file + kas_metrics_timeout_seconds
