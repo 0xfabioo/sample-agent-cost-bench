@@ -331,6 +331,13 @@ def test_cost_source_inferred_from_binary_name(tmp_path, monkeypatch):
         ("devin",         {"usd_per_input_token": 0.000005,
                            "usd_per_output_token": 0.000025},  CostSource.DEVIN_EXPORT),
         ("devin",         {},                                   CostSource.DEVIN_EXPORT),
+        ("pi",            {},                                   CostSource.PI_JSON),
+        ("/opt/homebrew/bin/pi", {},                            CostSource.PI_JSON),
+        # pi reports USD itself; optional token rates must not demote it to TOKENS
+        ("pi",            {"usd_per_input_token": 0.000002,
+                           "usd_per_output_token": 0.00001},    CostSource.PI_JSON),
+        # a longer name merely ENDING in "pi" is not the pi CLI
+        ("copi",          {},                                   CostSource.NONE),
         ("my-cli",        {"usd_per_input_token": 0.000001,
                            "usd_per_output_token": 0.000004},  CostSource.TOKENS),
         ("my-cli",        {"usd_per_premium_request": 0.04},   CostSource.PREMIUM_REQUEST),
@@ -394,6 +401,10 @@ def test_cli_compare_config_no_cost_source_in_yaml(tmp_path, monkeypatch):
               usd_per_output_token: 0.000025
             cli_base_args: ["-p", "{{prompt}}", "--model", "{{model}}",
                             "--export", "devin-usage.json"]
+          - name: pi
+            cli_path: pi
+            model_id: global.anthropic.claude-sonnet-5
+            cli_base_args: ["-p", "--mode", "json", "--model", "{{model}}", "{{prompt}}"]
         tasks_dir: {tasks_dir}
         """,
     )
@@ -404,3 +415,4 @@ def test_cli_compare_config_no_cost_source_in_yaml(tmp_path, monkeypatch):
     assert by_name["copilot"].cost_source == CostSource.COPILOT_JSON
     assert by_name["codex"].cost_source == CostSource.CODEX_JSON
     assert by_name["devin"].cost_source == CostSource.DEVIN_EXPORT
+    assert by_name["pi"].cost_source == CostSource.PI_JSON
