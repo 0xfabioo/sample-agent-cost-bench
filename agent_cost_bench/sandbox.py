@@ -397,6 +397,23 @@ class Workspace:
             if src_dir.exists():
                 shutil.copytree(src_dir, self._base / "src", dirs_exist_ok=True)
 
+        # Seed imported task INPUT files (Terminal-Bench tasks reference inputs by
+        # absolute /app paths that don't exist on the host). The importer places
+        # them under inputs/; copy them into the workspace ROOT so the model can
+        # read them directly at its cwd, matching the imported prompt's note.
+        #
+        # Deliberately NOT copied into src/: the grading container already carries
+        # the authoritative inputs at /app (baked into the image), and src/ is
+        # copied over /app at verify time. Seeding into src/ would let a
+        # model-modified input silently override the grader's real input. The
+        # model is told to put its SOLUTION under src/; inputs stay read-only at
+        # the workspace root.
+        inputs_dir = task_dir / "inputs"
+        if inputs_dir.is_dir():
+            for f in inputs_dir.iterdir():
+                if f.is_file():
+                    shutil.copy2(f, self._base / f.name)
+
         # Ensure the workspace is a git repo. Some CLIs (e.g. OpenCode)
         # refuse to operate in a non-git directory. This is a no-op for
         # repo tasks (which already have .git from the clone).
@@ -418,22 +435,6 @@ class Workspace:
             capture_output=True,
             timeout=30,
         )
-        # Seed imported task INPUT files (Terminal-Bench tasks reference inputs by
-        # absolute /app paths that don't exist on the host). The importer places
-        # them under inputs/; copy them into the workspace ROOT so the model can
-        # read them directly at its cwd, matching the imported prompt's note.
-        #
-        # Deliberately NOT copied into src/: the grading container already carries
-        # the authoritative inputs at /app (baked into the image), and src/ is
-        # copied over /app at verify time. Seeding into src/ would let a
-        # model-modified input silently override the grader's real input. The
-        # model is told to put its SOLUTION under src/; inputs stay read-only at
-        # the workspace root.
-        inputs_dir = task_dir / "inputs"
-        if inputs_dir.is_dir():
-            for f in inputs_dir.iterdir():
-                if f.is_file():
-                    shutil.copy2(f, self._base / f.name)
 
     def teardown(self, keep: bool = False) -> None:
         """Kept after a run for inspection; cleaned at the start of the next run."""
