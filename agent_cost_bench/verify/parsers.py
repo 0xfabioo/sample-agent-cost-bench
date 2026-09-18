@@ -14,6 +14,9 @@ Built-in parsers:
   tap           — Test Anything Protocol on stdout
   regex         — custom regex with named groups (passed/total or passed/failed)
   exit-code     — binary: exit 0 => 1/1, else 0/1
+  reward-file   — Harbor / Terminal-Bench 2.x: a reward.txt written by the task's
+                  own verifier (a float in [0,1], or an int pass/total pair).
+                  Used by imported Terminal-Bench 2.1 tasks.
 """
 
 from __future__ import annotations
@@ -166,6 +169,65 @@ def parse_exit_code(results_dir, stdout, stderr, exit_code, spec) -> ParseResult
                        detail="exit 0" if ok else f"exit {exit_code}")
 
 
+def parse_reward_file(results_dir, stdout, stderr, exit_code, spec) -> ParseResult:
+    """Harbor / Terminal-Bench 2.x reward contract.
+
+    A task's own verifier writes a reward to a file (Harbor's convention is
+    ``/logs/verifier/reward.txt``; the generic docker runner maps that to
+    ``$RESULTS_DIR``). The file holds either:
+
+      * a single float in [0, 1]  — a graduated reward, mapped to score directly, or
+      * two whitespace/slash-separated ints ``passed total`` (e.g. ``3 5`` or ``3/5``).
+
+    Terminal-Bench 1.x tasks that only echo a binary reward (``0`` / ``1``) work
+    too: ``1`` → 1/1, ``0`` → 0/1. Missing/empty/unparseable file → not ran
+    (treated as a build/verifier failure by the caller), so a task that never
+    produced a reward never silently scores as a pass.
+    """
+    files = _glob_one(results_dir, "reward.txt", "reward", "*.reward", "reward.json")
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if not text:
+            continue
+        # JSON reward: {"reward": 0.5} or {"passed": 3, "total": 5}
+        if text.startswith("{"):
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                data = None
+            if isinstance(data, dict):
+                if "passed" in data and "total" in data:
+                    total = int(data["total"])
+                    passed = int(data["passed"])
+                    return ParseResult(passed=passed, total=max(total, 0), ran=total > 0,
+                                       detail=f"{passed}/{total} (reward.json)")
+                rv = data.get("reward")
+                if rv is not None:
+                    r = max(0.0, min(1.0, float(rv)))
+                    return ParseResult(passed=int(round(r * 1000)), total=1000, ran=True,
+                                       detail=f"reward={r:.3f}")
+        # "passed total" or "passed/total" integer pair.
+        pair = re.match(r"^\s*(\d+)\s*[/\s]\s*(\d+)\s*$", text)
+        if pair:
+            passed, total = int(pair.group(1)), int(pair.group(2))
+            return ParseResult(passed=passed, total=max(total, 0), ran=total > 0,
+                               detail=f"{passed}/{total} (reward file)")
+        # Single float/int reward in [0, 1].
+        try:
+            r = float(text.split()[0])
+        except (ValueError, IndexError):
+            continue
+        r = max(0.0, min(1.0, r))
+        # Preserve fractional rewards: represent as passed/1000 so `score` is exact.
+        return ParseResult(passed=int(round(r * 1000)), total=1000, ran=True,
+                           detail=f"reward={r:.3f}")
+    return ParseResult(detail="no reward file produced by the task verifier "
+                              "(expected reward.txt in $RESULTS_DIR)")
+
+
 PARSERS = {
     "trx": parse_trx,
     "junit-xml": parse_junit_xml,
@@ -174,6 +236,7 @@ PARSERS = {
     "tap": parse_tap,
     "regex": parse_regex,
     "exit-code": parse_exit_code,
+    "reward-file": parse_reward_file,
 }
 
 

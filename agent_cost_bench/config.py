@@ -30,10 +30,12 @@ from rich.console import Console
 from .models import (
     BenchConfig,
     CompareMode,
+    RepoSpec,
     ScoringWeights,
     SpecWorkflow,
     TaskConfig,
     TaskMode,
+    TaskSourceSpec,
 )
 from .targets import make_cli_target, make_kiro_target
 
@@ -97,6 +99,22 @@ def _passthrough(raw: dict[str, Any]) -> dict[str, Any]:
     return {k: raw[k] for k in _PASSTHROUGH if k in raw}
 
 
+def _parse_task_sources(raw: dict[str, Any]) -> list[TaskSourceSpec]:
+    """Parse the optional top-level ``task_sources:`` list into typed specs."""
+    entries = raw.get("task_sources") or []
+    if not isinstance(entries, list):
+        raise ValueError("task_sources must be a list")
+    specs: list[TaskSourceSpec] = []
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"task_sources[{i}] must be a mapping with 'type' and 'path'")
+        try:
+            specs.append(TaskSourceSpec(**entry))
+        except ValidationError as e:
+            raise ValueError(f"Invalid task_sources[{i}]: {e}") from e
+    return specs
+
+
 # ---------------------------------------------------------------------------
 # cli-compare
 # ---------------------------------------------------------------------------
@@ -120,6 +138,7 @@ def load_cli_compare_config(config_path: str | Path) -> BenchConfig:
         mode=CompareMode.CLI_COMPARE,
         targets=targets,
         comparison_label=comparison_label,
+        task_sources=_parse_task_sources(raw),
         **_passthrough(raw),
     )
     # cli-compare is vibe-only.
@@ -188,6 +207,7 @@ def load_model_compare_config(config_path: str | Path) -> BenchConfig:
         kas_proxy_metrics_file=kas_metrics_file,
         kas_proxy_metrics_timeout_seconds=kas_metrics_timeout,
         vibe_use_pty=bool(raw.get("vibe_use_pty", False)),
+        task_sources=_parse_task_sources(raw),
         **_passthrough(raw),
     )
     if "judge_weight" in raw:
@@ -211,17 +231,118 @@ def load_config(config_path: str | Path, mode: CompareMode) -> BenchConfig:
 # ---------------------------------------------------------------------------
 
 
-def discover_tasks(config: BenchConfig) -> list[TaskConfig]:
-    """
-    Walk the tasks directory and load all task.yaml files, applying task-id and
-    mode filters. cli-compare silently skips spec-driven tasks (it is vibe-only).
-    """
-    tasks_root = Path(config.tasks_dir).expanduser().resolve()
-    if not tasks_root.exists():
-        raise FileNotFoundError(f"Tasks directory not found: {tasks_root}")
+def _resolve_task_source_path(src: TaskSourceSpec, workspace_base: Path) -> str:
+    """Return a local directory to import a task source from.
 
-    task_configs: list[TaskConfig] = []
-    for task_yaml_path in sorted(tasks_root.rglob("task.yaml")):
+    * Git URL  → clone (cached under ``workspace_base/.repo_cache``) and return
+      the local checkout, honoring ``subdir`` so a monorepo's ``tasks/`` folder
+      imports cleanly. The clone is shared/cached across runs.
+    * Local path → return it unchanged (``import_task_source`` expands/validates).
+    """
+    if not src.is_git_source:
+        return src.path
+
+    # Imported lazily to avoid pulling the sandbox (and its deps) at import time.
+    from .sandbox import clone_repo
+
+    repo = src.as_repo_spec()
+    console.print(f"[dim]Cloning task source {repo.url} (ref={repo.ref})…[/dim]")
+    local_root = clone_repo(repo, workspace_base)
+    return str(local_root)
+
+
+def materialize_task_sources(config: BenchConfig) -> Path | None:
+    """Convert every enabled ``task_sources`` entry into native fixtures under a
+    staging root, and return that root (or None when no sources are configured).
+
+    The staging root lives under ``<workspace_base>/.imported-tasks`` so it is
+    kept separate from the repo's own ``tasks/`` tree. Import failures for one
+    source are reported and skipped rather than aborting the whole run.
+    """
+    sources = [s for s in getattr(config, "task_sources", []) if s.enabled]
+    if not sources:
+        return None
+
+    from .importers import import_task_source
+    from .importers.base import ImportError_
+
+    workspace_base = Path(config.workspace_base).expanduser().resolve()
+    staging = workspace_base / ".imported-tasks"
+    # Rebuild staging from scratch each run so it reflects EXACTLY the sources
+    # and per-source `tasks:` filters configured right now. Without this, tasks
+    # imported by a previous (e.g. unfiltered) run linger under staging and get
+    # discovered and run even though they're no longer selected. The upstream
+    # clone cache (.repo_cache) is untouched, so this does not re-fetch anything.
+    # robust_rmtree clears read-only git files so the wipe also works on Windows.
+    if staging.exists():
+        from .sandbox import robust_rmtree
+
+        robust_rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    total = 0
+    for src in sources:
+        # Resolve the import source path. When `src.path` is a git URL, clone it
+        # (cached under workspace_base/.repo_cache) and import from the local
+        # checkout — so the user never has to download the tasks by hand. A plain
+        # local path is used as-is.
+        try:
+            source_path = _resolve_task_source_path(src, workspace_base)
+        except Exception as e:
+            console.print(
+                f"[yellow]⚠ Skipping task source '{src.type}' ({src.path}): {e}[/yellow]"
+            )
+            continue
+
+        # Determine which tasks to import. An explicit `tasks:` filter always
+        # wins. Otherwise, for a terminal-bench source, default to the
+        # empirically-confirmed harness-compatible allowlist so a default run
+        # (no tasks: given) runs only tasks this host-agent harness can grade,
+        # instead of the full suite where most tasks fail structurally.
+        only = src.tasks or None
+        used_default_allowlist = False
+        if only is None and src.type.strip().lower() in ("terminal-bench", "terminal-bench-2", "tb"):
+            from .importers.terminal_bench import terminal_bench_supported_tasks
+
+            only = list(terminal_bench_supported_tasks())
+            used_default_allowlist = True
+            console.print(
+                f"[dim]No tasks: filter given — defaulting to the "
+                f"{len(only)} harness-compatible Terminal-Bench task(s). "
+                f"Set tasks: explicitly to override.[/dim]"
+            )
+
+        try:
+            imported = import_task_source(
+                source_type=src.type,
+                source_path=source_path,
+                dest_root=staging,
+                native_mode=src.mode,
+                only=only,
+                timeout_minutes=src.timeout_minutes,
+                # A user's explicit tasks: is strict (typos error); the built-in
+                # default allowlist is best-effort (skip an upstream-renamed entry).
+                strict_only=not used_default_allowlist,
+            )
+        except ImportError_ as e:
+            console.print(f"[yellow]⚠ Skipping task source '{src.type}' ({src.path}): {e}[/yellow]")
+            continue
+        total += len(imported)
+        for rec in imported:
+            for w in rec.warnings:
+                console.print(f"[yellow]⚠ {rec.native_id}: {w}[/yellow]")
+        console.print(
+            f"[green]✓[/green] Imported {len(imported)} task(s) from {src.type} ({src.path})"
+        )
+    if total:
+        console.print(f"[dim]Imported tasks staged under {staging}[/dim]")
+    return staging
+
+
+def _scan_task_root(root: Path, config: BenchConfig) -> list[TaskConfig]:
+    """Load and filter every task.yaml under one root."""
+    found: list[TaskConfig] = []
+    for task_yaml_path in sorted(root.rglob("task.yaml")):
         try:
             tc = _load_task_config(task_yaml_path)
         except Exception as e:
@@ -240,12 +361,62 @@ def discover_tasks(config: BenchConfig) -> list[TaskConfig]:
         if config.modes and tc.mode not in config.modes:
             continue
 
-        task_configs.append(tc)
+        found.append(tc)
+    return found
+
+
+def discover_tasks(config: BenchConfig) -> list[TaskConfig]:
+    """
+    Load all task.yaml files from the active task root and apply task-id and
+    mode filters. cli-compare silently skips spec-driven tasks (it is vibe-only).
+
+    When ``task_sources`` are configured (e.g. Terminal-Bench 2.1), they are
+    converted to native fixtures and run *instead of* the repo's own ``tasks/``
+    tree — configuring an external benchmark makes it the exclusive task set, so
+    a Terminal-Bench run isn't diluted by this repo's sample tasks. Without any
+    ``task_sources`` the local ``tasks_dir`` is used as before.
+    """
+    tasks_root = Path(config.tasks_dir).expanduser().resolve()
+
+    # External benchmarks are exclusive: when any enabled task_source is
+    # configured, run ONLY the imported tasks and skip tasks_dir. Otherwise fall
+    # back to the repo's local tasks tree.
+    has_sources = any(s.enabled for s in getattr(config, "task_sources", []))
+    staging = materialize_task_sources(config)
+
+    roots: list[Path] = []
+    if has_sources:
+        if staging is not None and staging.exists():
+            roots.append(staging)
+        else:
+            raise ValueError(
+                "task_sources are configured but no tasks could be imported from them. "
+                "Check the source path/URL, ref, subdir, and task filters."
+            )
+    else:
+        if tasks_root.exists():
+            roots.append(tasks_root)
+        if not roots:
+            raise FileNotFoundError(
+                f"Tasks directory not found: {tasks_root} (and no importable task_sources)"
+            )
+
+    task_configs: list[TaskConfig] = []
+    seen_ids: set[str] = set()
+    for root in roots:
+        for tc in _scan_task_root(root, config):
+            if tc.id in seen_ids:
+                console.print(f"[yellow]⚠ Duplicate task id '{tc.id}' — keeping the first[/yellow]")
+                continue
+            seen_ids.add(tc.id)
+            task_configs.append(tc)
 
     if not task_configs:
+        where = "imported task_sources" if has_sources else f"'{tasks_root}'"
         raise ValueError(
-            f"No tasks found in '{tasks_root}' matching the configured filters. "
-            "Check tasks_dir, task_ids, and modes."
+            f"No tasks found in {where} matching the configured filters. "
+            "Check task_ids and modes"
+            + (" and the task_sources filters." if has_sources else " and tasks_dir.")
         )
     return task_configs
 

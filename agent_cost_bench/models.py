@@ -103,6 +103,7 @@ class CostSource(str, Enum):
     OPENCODE_JSON = "opencode_json"      # parse `opencode run --format json` step_finish events
     ANTIGRAVITY_JSON = "antigravity_json"  # parse `agy -p --output-format json` result object
     DEVIN_EXPORT = "devin_export"        # parse `devin -p --export <file>` ATIF final_metrics
+    PI_JSON = "pi_json"                  # parse `pi -p --mode json` JSONL turn_end usage/cost
     TOKENS = "tokens"                    # parse token counts via regex, price per-token
     PREMIUM_REQUEST = "premium_request"  # fixed N premium/credit requests per run × price
     KAS_PROXY_METRICS = "kas_proxy_metrics"  # read kas-proxy's metrics.jsonl, correlated by run_id
@@ -129,6 +130,9 @@ class Pricing(BaseModel):
                              + usd_per_output_token
       - devin_export      -> usd_per_input_token + usd_per_cached_input_token
                              + usd_per_output_token
+      - pi_json           -> (none; the CLI reports a USD cost per turn from its
+                             own model catalog. Optional token rates are used
+                             only as a fallback when that cost is absent.)
       - tokens            -> usd_per_input_token + usd_per_output_token
       - premium_request   -> usd_per_premium_request
       - kas_proxy_metrics -> kas_metrics_file + kas_metrics_timeout_seconds
@@ -432,10 +436,20 @@ class VerifySpec(BaseModel):
 
     # --- docker runner ---
     image: str | None = Field(default=None, description="Docker image to run verification in")
+    # When the image is not already present on the daemon, the framework can
+    # build it from this task-relative context directory (must contain a
+    # Dockerfile). Used by imported Terminal-Bench tasks that ship an
+    # environment/ Dockerfile instead of a prebuilt image, but works for any
+    # hand-written Docker task too. None = never auto-build (image must be
+    # pre-pulled/pre-built, e.g. the shared agent-cost-bench-* images).
+    build_context: str | None = Field(
+        default=None,
+        description="Task-relative dir with a Dockerfile to build `image` from if it is missing.",
+    )
     test_cmd: str | None = Field(default=None, description="Shell command that runs the tests")
     parser: str = Field(
         default="exit-code",
-        description="Result parser: trx|junit-xml|pytest-json|vitest-json|tap|regex|exit-code",
+        description="Result parser: trx|junit-xml|pytest-json|vitest-json|tap|regex|exit-code|reward-file",
     )
     setup: list[str] = Field(
         default_factory=list, description="Shell commands run in $BUILD before test_cmd"
@@ -490,6 +504,125 @@ class RubricSpec(BaseModel):
         description="Optional task-relative path (file or dir) to a golden solution "
         "shown to the judge to anchor its grading",
     )
+
+
+class TaskSourceSpec(BaseModel):
+    """
+    An external benchmark whose tasks are imported and run by this framework.
+
+    Declared in a run config under ``task_sources:``. At discovery time each
+    source is converted to native task fixtures (a ``task.yaml`` + ``verify/``
+    assets) under a staging directory, which is then discovered like any other
+    task. This is how a config can say "run Terminal-Bench 2.1 tasks" and have
+    the framework pick them up, convert them, and run them.
+
+    ``path`` may be either a **local directory** OR a **git URL**. When it is a
+    git URL (``https://``, ``http://``, ``ssh://``, ``git@host:org/repo`` or a
+    ``github.com/org/repo`` shorthand), the framework clones the repository into
+    its own cache (``workspace_base/.repo_cache/…``) on first use and imports the
+    tasks from there — the user does not have to download anything by hand. The
+    optional ``ref`` / ``subdir`` / ``depth`` / ``token_env`` fields tune that
+    clone and are ignored for a local ``path``.
+
+    Example (YAML)::
+
+        task_sources:
+          # Auto-cloned from GitHub — nothing to download first:
+          - type: terminal-bench
+            path: https://github.com/laude-institute/terminal-bench
+            ref: main                      # branch, tag, or 40-char commit SHA
+            subdir: tasks                  # tasks live under this repo subdir
+            tasks: [hello-world]           # optional name filter
+          # Or a local checkout (ref/subdir/depth/token_env ignored):
+          - type: terminal-bench
+            path: ~/benchmarks/terminal-bench/tasks
+    """
+
+    model_config = {"protected_namespaces": ()}
+
+    type: str = Field(
+        description="Importer to use: 'terminal-bench' (Terminal-Bench 2.x/Harbor)."
+    )
+    path: str = Field(
+        description=(
+            "A git URL (auto-cloned + cached by the framework) OR a local path to "
+            "a single task dir / a directory of task dirs to import."
+        )
+    )
+    tasks: list[str] = Field(
+        default_factory=list,
+        description="Optional list of source task names to include (empty = all).",
+    )
+    mode: str = Field(
+        default="vibe",
+        description="Native task mode for the imported fixtures (Terminal-Bench tasks are vibe).",
+    )
+    timeout_minutes: int | None = Field(
+        default=None, ge=1,
+        description=(
+            "Override the per-task agent timeout (minutes) for every task imported "
+            "from this source. Terminal-Bench tasks carry their own (often tight) "
+            "timeout from the source task.toml; set this to give the agent more "
+            "time without editing generated fixtures. None = keep the source value."
+        ),
+    )
+    # ---- git-source options (used only when `path` is a git URL) ----
+    ref: str = Field(
+        default="main",
+        description=(
+            "Branch, tag, or full 40-char commit SHA to clone when `path` is a git "
+            "URL. Pin a SHA for reproducibility. Ignored for a local path."
+        ),
+    )
+    subdir: str | None = Field(
+        default=None,
+        description=(
+            "Subdirectory within the cloned repo that holds the tasks (e.g. "
+            "'tasks'). Sparse-checked-out. Ignored for a local path."
+        ),
+    )
+    depth: int = Field(
+        default=1, ge=0,
+        description="git clone --depth for a git URL (1 = shallow/fast; 0 = full). Ignored for a local path.",
+    )
+    token_env: str | None = Field(
+        default=None,
+        description=(
+            "Name of an env var holding a token for cloning a PRIVATE repo over "
+            "HTTPS (e.g. 'GITHUB_TOKEN'). The variable NAME, never the token. "
+            "Ignored for a local path."
+        ),
+    )
+    enabled: bool = Field(default=True)
+
+    @property
+    def is_git_source(self) -> bool:
+        """True when ``path`` looks like a git URL rather than a local path."""
+        p = self.path.strip()
+        return (
+            p.startswith(("https://", "http://", "ssh://", "git://", "git@"))
+            or p.startswith(("github.com/", "www.github.com/"))
+        )
+
+    def as_repo_spec(self) -> "RepoSpec":
+        """Build a :class:`RepoSpec` from this source's git fields.
+
+        Normalizes a bare ``github.com/org/repo`` shorthand to an ``https://``
+        URL so it clones without the user typing the scheme. Raises if called on
+        a non-git (local) source.
+        """
+        if not self.is_git_source:
+            raise ValueError(f"task source path is not a git URL: {self.path}")
+        url = self.path.strip()
+        if url.startswith(("github.com/", "www.github.com/")):
+            url = "https://" + url.removeprefix("www.")
+        return RepoSpec(
+            url=url,
+            ref=self.ref,
+            subdir=self.subdir,
+            depth=self.depth,
+            token_env=self.token_env,
+        )
 
 
 class TaskConfig(BaseModel):
@@ -609,6 +742,10 @@ class BenchConfig(BaseModel):
     tasks_dir: str = Field(default="tasks")
     task_ids: list[str] | None = Field(default=None)
     modes: list[TaskMode] | None = Field(default=None)
+    # External benchmarks (e.g. Terminal-Bench 2.1) imported and run
+    # alongside native tasks. Each is converted to native fixtures at discovery
+    # time under `<workspace_base>/.imported-tasks/` and discovered normally.
+    task_sources: list[TaskSourceSpec] = Field(default_factory=list)
 
     # ---- Execution ----
     # Concurrency strategy. Controls how many task × target jobs run at once.

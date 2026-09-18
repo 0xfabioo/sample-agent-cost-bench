@@ -982,6 +982,152 @@ def parse_devin_usage(pricing: Pricing, workspace: Path | None) -> Usage:
     )
 
 
+# ---------------------------------------------------------------------------
+# pi CLI JSONL (`pi -p --mode json`)
+# ---------------------------------------------------------------------------
+
+
+def parse_pi_usage(stdout: str, stderr: str, pricing: Pricing) -> Usage:
+    """Parse the pi coding agent's ``-p --mode json`` JSON-Lines stream.
+
+    ``pi`` streams one self-describing JSON object per line. Usage is attached to
+    every assistant message, but the authoritative per-turn total is the
+    ``turn_end`` event::
+
+        {"type":"turn_end","message":{
+            "role":"assistant","provider":"amazon-bedrock",
+            "model":"global.anthropic.claude-sonnet-5",
+            "usage":{"input":3,"output":70,"cacheRead":0,"cacheWrite":6512,
+                     "totalTokens":6585,
+                     "cost":{"input":0.000009,"output":0.00105,"cacheRead":0,
+                             "cacheWrite":0.02442,"total":0.025479}},
+            "stopReason":"toolUse","timestamp":1789580503571},
+         "toolResults":[…]}
+
+    An agentic run makes several model calls, so token counts and cost are
+    **summed across every** ``turn_end`` **event** (the same aggregation the
+    Codex parser applies to ``turn.completed``). ``message_end`` events carry the
+    same numbers as their enclosing turn and are deliberately ignored so nothing
+    is counted twice. When the stream contains no ``turn_end`` at all (e.g. the
+    run was killed mid-turn), the assistant messages listed in the final
+    ``agent_end`` event are used instead.
+
+    Token semantics — ``input`` is the **fresh, non-cached** prompt slice, with
+    ``cacheRead`` and ``cacheWrite`` reported alongside it (verified against a
+    real run: turn 1 wrote 6512 tokens to cache, turn 2 read exactly those 6512
+    back). Total input processed is therefore
+    ``input + cacheRead + cacheWrite``.
+
+    Cost: unlike Cursor/Codex/Antigravity, ``pi`` prices the turn itself from its
+    bundled model catalog and reports USD directly, so the reported
+    ``cost.total`` is preferred and **no pricing config is required** — the same
+    arrangement as Claude Code's ``total_cost_usd``. Per-token rates in
+    ``pricing`` are used only as a fallback when the stream carries no cost
+    figure (an unpriced or custom model), computed as::
+
+        cost = input      × usd_per_input_token
+             + cacheRead  × usd_per_cached_input_token
+             + cacheWrite × usd_per_cache_write_token
+             + output     × usd_per_output_token
+
+    Timing comes from the span between the first and last event timestamp
+    (``pi`` reports no duration field); ``None`` when fewer than two timestamps
+    are present.
+    """
+    in_tok = out_tok = cache_read = cache_write = 0
+    reported_cost = 0.0
+    saw_usage = False
+    saw_cost = False
+    timestamps: list[float] = []
+
+    def _accumulate(msg: dict) -> None:
+        nonlocal in_tok, out_tok, cache_read, cache_write, reported_cost
+        nonlocal saw_usage, saw_cost
+        usage = msg.get("usage")
+        if not isinstance(usage, dict):
+            return
+        saw_usage = True
+        in_tok += _safe_int(usage.get("input")) or 0
+        out_tok += _safe_int(usage.get("output")) or 0
+        cache_read += _safe_int(usage.get("cacheRead")) or 0
+        cache_write += _safe_int(usage.get("cacheWrite")) or 0
+        cost = usage.get("cost")
+        if isinstance(cost, dict) and isinstance(cost.get("total"), (int, float)):
+            reported_cost += float(cost["total"])
+            saw_cost = True
+
+    objs = _find_json_objects(stdout) or _find_json_objects(stderr)
+    agent_end: dict | None = None
+    for obj in objs:
+        etype = obj.get("type")
+        msg = obj.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("timestamp"), (int, float)):
+            timestamps.append(float(msg["timestamp"]))
+        if etype == "turn_end" and isinstance(msg, dict):
+            _accumulate(msg)
+        elif etype == "agent_end":
+            agent_end = obj
+
+    # Fallback: no turn_end in the stream (killed mid-turn) — take the assistant
+    # messages from the final agent_end summary instead.
+    if not saw_usage and agent_end is not None:
+        for msg in agent_end.get("messages") or []:
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                _accumulate(msg)
+
+    if not saw_usage:
+        return Usage()
+
+    total_in = in_tok + cache_read + cache_write
+
+    # A reported cost of exactly zero alongside real token usage is not
+    # credible — it means this model/route reported no price rather than that
+    # the turn was free. Fall through to the configured rates in that case (and
+    # to `None` when none are set) instead of publishing $0.00. Observed with
+    # OpenAI models on Bedrock: a rejected request emits
+    # stopReason:"error" with all-zero usage AND all-zero cost — there
+    # genuinely was no charge, and tokens are zero too, so $0.00 stands.
+    if saw_cost and reported_cost == 0.0 and (total_in + out_tok) > 0:
+        saw_cost = False
+
+    if saw_cost:
+        cost_usd: float | None = reported_cost
+    else:
+        cost_usd = None
+        p_in = pricing.usd_per_input_token
+        p_out = pricing.usd_per_output_token
+        if p_in is not None and p_out is not None:
+            p_cache_read = (
+                pricing.usd_per_cached_input_token
+                if pricing.usd_per_cached_input_token is not None
+                else p_in
+            )
+            p_cache_write = (
+                pricing.usd_per_cache_write_token
+                if pricing.usd_per_cache_write_token is not None
+                else p_in
+            )
+            cost_usd = (
+                in_tok * p_in
+                + cache_read * p_cache_read
+                + cache_write * p_cache_write
+                + out_tok * p_out
+            )
+
+    seconds = None
+    if len(timestamps) >= 2:
+        span = (max(timestamps) - min(timestamps)) / 1000.0
+        seconds = span if span > 0 else None
+
+    return Usage(
+        cost_usd=cost_usd,
+        input_tokens=total_in or None,
+        cached_input_tokens=(cache_read + cache_write) or None,
+        output_tokens=out_tok or None,
+        seconds=seconds,
+    )
+
+
 def parse_token_regex_usage(
     stdout: str, stderr: str, pricing: Pricing, token_regex: str | None
 ) -> Usage:
@@ -1136,6 +1282,8 @@ def parse_usage(
         return parse_antigravity_usage(stdout, stderr, p)
     if src == CostSource.DEVIN_EXPORT:
         return parse_devin_usage(p, workspace)
+    if src == CostSource.PI_JSON:
+        return parse_pi_usage(stdout, stderr, p)
     if src == CostSource.KAS_PROXY_METRICS:
         return parse_kas_proxy_metrics_usage(p, run_id)
     if src == CostSource.TOKENS:

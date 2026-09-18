@@ -14,7 +14,7 @@ Bring any model, any CLI, and any use case — a real GitHub repo with your own 
 
 The framework is designed to be flexible:
 
-- **Any CLI** — Kiro, Claude Code, GitHub Copilot, Cursor, OpenAI Codex, Antigravity, Devin - Currently supported CLI's.
+- **Any CLI** — Kiro, Claude Code, GitHub Copilot, Cursor, OpenAI Codex, Antigravity, Devin, pi - Currently supported CLI's.
 - **Any model** — Anthropic (Claude), OpenAI (o-series, GPT-5.x) or anything your CLI exposes.
 - **Any use case** — greenfield tasks included out of the box, or bring your own GitHub repo (public or private). The framework clones it, hands it to the model, and verifies the result.
 - **Multiple verification options** — pytest, Docker containers, custom scorers, or LLM-judge rubrics. Pick the one that fits; no verification code is required for rubric-graded tasks.
@@ -25,7 +25,7 @@ Cost is always reported two ways: USD and native units (credits / AI Credits / t
 
 - **Python 3.10+**
 - **The coding CLI(s) you want to benchmark**, installed and logged in:
-  - `cli-compare`: the CLIs you list as runners (e.g. `kiro-cli`, `claude`, `copilot`, `agent`, `codex`, `agy`, `devin`)
+  - `cli-compare`: the CLIs you list as runners (e.g. `kiro-cli`, `claude`, `copilot`, `agent`, `codex`, `agy`, `devin`, `pi`)
   - `model-compare`: the Kiro CLI
 - **Docker** — only if you run the multi-language tasks (C#/.NET, Java,
   TypeScript, Terraform, Helm). Build images once with `./tasks/docker/build-images.sh`.
@@ -46,6 +46,68 @@ pip install -e .            # installs the `agent-cost-bench` command
 pip install -e ".[dev]"     # optional: dev/test extras
 ```
 
+## Interactive runner (`run.sh`)
+
+If you'd rather not clone, install, and hand-write a config yourself, the repo ships a self-contained interactive runner that walks you through the whole thing. It's the fastest way to go from zero to a rendered cost comparison, and it runs **entirely on your machine**
+
+```bash
+./run.sh            # interactive, full flow
+```
+
+The script drives a `cli-compare` run through four steps:
+
+1. **Preflight** — checks for the tools it needs (`git`, `python3`, `curl`, and `npm` if you pick an npm-based CLI) and tells you exactly what's missing before doing anything.
+2. **Install** — clones the benchmark fresh into a timestamped per-run folder (so every run uses the latest `main`), creates an isolated virtualenv, installs `agent-cost-bench`, and installs the vendor CLIs for the runners you selected.
+3. **Configure** — lets you pick which CLIs to compare, queries each CLI for its own available models so you can choose from a live list, collects and caches API keys, handles CLIs that need an interactive login, and generates a valid `config.yaml` for you.
+4. **Run** — runs the benchmark on this host, writes the HTML/JSON report into a local results directory, and opens the report at the end.
+
+### Why use it
+
+- **No config authoring.** It generates a correct `cli-compare` config — including the fiddly per-CLI `cli_base_args`, pricing blocks, and the flags each CLI actually needs (e.g. Antigravity's `--add-dir`/`--print-timeout`) — so you don't have to copy an example and get the details right by hand.
+- **Guided model selection.** For each CLI it runs that CLI's own "list models" command and shows a numbered picker, falling back to a sensible default when a CLI can't list (not logged in, no list command). No guessing model slugs.
+- **Authentication handled for you.** It knows which CLIs use an env-var API key versus an interactive login, prompts only where a key applies, and offers to run the login command for the rest. Entered keys are cached (chmod 600) so you only type each one once.
+- **Fresh + reproducible.** Each run gets its own clone and venv, isolated from other runs, and records the exact commit it checked out.
+- **Safe by default.** Input for keys is hidden, cached secrets are masked in logs, and the `.env` cache is kept private. Keep that `.env` out of git.
+
+> **What the script prompts for vs. what it defaults.** `run.sh` only asks you to choose the **CLIs to compare**, a **model per CLI**, the global **effort**, and (optionally) a report **label**. Every other config key is written with a fixed default — it does **not** prompt for them. If you need to change any of these, edit the generated `config.yaml` (its path is printed during the run) and re-run with `--config <that file>`, or write your own config from `config.cli-compare.example.yaml`. The baked-in defaults are:
+>
+> | Config key | Default written by `run.sh` | What it means |
+> |------------|-----------------------------|---------------|
+> | `judge_cli_path` | `kiro-cli` | CLI used as the LLM judge for rubric-graded tasks (needs Kiro installed + authenticated) |
+> | `judge_model` | `claude-opus-4.8` | Model the judge uses to grade |
+> | `judge_weight` | `0.6` | Weight of the judge score in the blended result |
+> | `modes` | `["vibe"]` | cli-compare runs vibe tasks only |
+> | `task_ids` | *(empty)* | Runs **all** bundled tasks — including Docker-graded ones, which need a local Docker daemon |
+> | `concurrency` | `per_target` | Parallelism strategy |
+> | `timeout_minutes` | `20` | Per-task timeout |
+> | `repeats` | `1` | Runs each task once |
+> | `functional_pass_threshold` | `0.99` | Score needed to count as a PASS |
+> | `workspace_base` | `/tmp/agent-cost-bench-cli-compare` | Where per-task workspaces are created |
+> | `devin_permissions_file` | `tasks/devin/config.json` | Scoped Devin permission policy copied into each workspace |
+> | `output_dir` | `results` | Report directory inside the run's benchmark checkout (final reports are also copied to `acb-results/<runId>`) |
+> | `open_report` | `false` | The harness doesn't auto-open; `run.sh` opens the HTML itself unless `--no-open` |
+>
+> Note the empty `task_ids` means a plain run executes the **entire** bundled task suite, some of which require Docker. To run a subset, edit `task_ids:` in the generated config and re-run with `--config`.
+
+### Common flags
+
+```bash
+./run.sh --yes                  # accept defaults (Kiro + Claude Code, opus)
+./run.sh --skip-install         # reuse the most recent clone/venv, skip installs
+./run.sh --no-open              # don't open the report at the end
+./run.sh --config path.yaml     # use an existing config, skip all prompts
+./run.sh --no-save-keys         # don't cache entered API keys to .env
+./run.sh --label "Opus shootout" # set the report's comparison label
+./run.sh --effort high          # global reasoning effort: low|medium|high
+./run.sh --help                 # full usage
+```
+
+A single global `--effort` (default `high`) is applied across all CLIs — via the `{effort}` flag for CLIs that take one, or appended to the model slug for the rest. Per-task effort in a `task.yaml` still overrides it.
+
+You can also point environment variables at custom locations: `BENCH_REPO_REF` (branch/tag/SHA to clone), `BENCH_HOME` (workspace root), `RESULTS_DIR` (where reports land), and `ACB_ENV_FILE` (the cached-keys file).
+
+> **Cost warning applies here too.** The runner benchmarks against your own subscriptions and consumes credits/tokens/premium requests. It defaults to running all bundled tasks.
+
 ## Quick start
 
 ### Step 1: Copy an example config
@@ -62,6 +124,8 @@ cp config.model-compare.example.yaml config.model-compare.yaml
 
 Then edit your copy with your specific paths, model IDs, and pricing rates (see below).
 
+> **Prefer not to hand-write a config?** The interactive runner script does all of steps 1–3 for you — see [Interactive runner](#interactive-runner-runsh) below.
+
 ### Step 2: Set up authentication
 
 Each CLI reads its API key from standard environment variables. Set these in your shell before running:
@@ -74,6 +138,9 @@ export CURSOR_API_KEY=...        # Cursor (or use `cursor login`)
 export OPENAI_API_KEY=...        # Codex (or use `codex auth login`)
 # Antigravity: use `agy login`
 # Devin: use `devin auth login` (no env-var equivalent)
+# pi: reads its provider's own credentials (e.g. AWS credentials for
+#     amazon-bedrock, ANTHROPIC_API_KEY / OPENAI_API_KEY for those providers).
+#     Verify with: pi auth check --provider <name> --json
 ```
 
 The harness inherits the parent shell's environment, so all CLIs pick up their keys automatically — no per-runner `env:` block needed.
@@ -93,6 +160,7 @@ Pricing rates are volatile and change over time. Check each vendor's current pri
 | **OpenAI Codex** | Token-level rates (see below) | [platform.openai.com/docs/pricing](https://platform.openai.com/docs/pricing) |
 | **Antigravity** | Token-level rates (see below) | Verify the per-token rates for your chosen `agy` model |
 | **Devin** | Token-level rates (see below) | `devin models list` prints per-MTok rates per model slug |
+| **pi** | No pricing config needed — prices each turn from its bundled model catalog and reports USD | `pi --list-models` shows the catalog; token rates may be supplied as a fallback for unpriced models |
 
 #### Token-level pricing (Cursor, Codex, and Devin)
 
@@ -220,7 +288,7 @@ Two `agy`-specific flags in the block above are **not optional** for the benchma
 
 **Tips for running Antigravity:**
 
-- **Log in first** with `agy login`, and confirm your account can use the model you set — run `agy models` and copy an exact id (base slug like `gemini-3.8-flash`, or a full slug like `gemini-3.8-flash-high`).
+- **Log in first** with `agy`, and confirm your account can use the model you set — run `agy models` and copy an exact id (base slug like `gemini-3.8-flash`, or a full slug like `gemini-3.8-flash-high`).
 - **Expect slower wall-clock times.** In practice Gemini 3.8 Flash spent several minutes on the larger multi-file tasks. Budget headroom in both `--print-timeout` and the harness `timeout_minutes`.
 - **Sanity-check the result status** in the run log's `RESPONSE` block: it should read `"status":"SUCCESS"`, not `"status":"ERROR"`. An `ABNORMAL EXIT ... exit 1` line for the antigravity target means `agy` returned a non-success result — read the `error` field to see why. Two common ones:
   - `"timeout waiting for response"` → the print timeout was hit; raise `--print-timeout`.
@@ -247,6 +315,39 @@ The policy allows the shell, which makes that deny list a speed bump rather than
 Print mode cannot display Devin's interactive workspace-trust prompt and aborts in an untrusted directory. Trust is inherited by child directories, so run `devin` once interactively in your `workspace_base` and approve it — every per-run workspace created underneath is then trusted, and no flag is needed. Prefer this to `--respect-workspace-trust false`, which turns the check off for the whole run; add the flag only where nobody can approve interactively, such as CI.
 
 > Do **not** point Devin's `--config` flag at a file you intend to commit: the CLI writes session state (including your `org_id`) back into it.
+
+#### pi specifics
+
+The `pi` coding agent is a bring-your-own-provider CLI: it talks to whichever provider you have credentials for (Amazon Bedrock, Anthropic, OpenAI, …) and prices each turn itself from a bundled model catalog. `pi -p --mode json` streams JSON Lines, and every `turn_end` event carries both token counts and a USD cost:
+
+```json
+{"type":"turn_end","message":{"provider":"amazon-bedrock",
+  "model":"global.anthropic.claude-sonnet-5",
+  "usage":{"input":3,"output":70,"cacheRead":0,"cacheWrite":6512,
+    "cost":{"input":0.000009,"output":0.00105,"cacheRead":0,
+            "cacheWrite":0.02442,"total":0.025479}}}}
+```
+
+The harness sums `cost.total` across every `turn_end`, so **no pricing block is required** — the same arrangement as Claude Code. Per-token rates are honoured only as a fallback for a model the catalog does not price. `usage.input` is the fresh, non-cached prompt slice, reported alongside `cacheRead` / `cacheWrite`, so total input is the sum of the three.
+
+```yaml
+- name: pi
+  display_name: "pi (claude-sonnet-5)"
+  cli_path: pi
+  model_id: global.anthropic.claude-sonnet-5
+  cli_base_args: ["-p", "--mode", "json",
+                  "--provider", "amazon-bedrock", "--model", "{model}",
+                  "--thinking", "{effort}",
+                  "--no-session", "--no-approve", "{prompt}"]
+```
+
+Notes on the flags:
+
+- **`--provider`** — `pi`'s default provider is `google`, so pass the provider you are actually authenticated against or the run fails at the first turn. Check readiness with `pi auth check --provider amazon-bedrock --json` (expect `"status":"ready"`), and list the exact model ids with `pi --list-models`. Alternatively encode both in one value: `--model amazon-bedrock/global.anthropic.claude-sonnet-5`.
+- **`--thinking {effort}`** — `pi` takes the reasoning level as a flag (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), which lines up with the task's `effort` value directly. No model-slug suffix games as with Cursor/Devin/Antigravity.
+- **`--no-session`** — keeps each benchmark run stateless instead of appending to `~/.pi` session storage.
+- **`--no-approve`** — ignores project-local `pi` config, extensions, and skills found in the workspace. Worth keeping for a brownfield task that clones a repo you do not control: without it, files in the cloned tree could influence the run.
+- **`-p` implies non-interactive**, and built-in `read`/`write`/`edit`/`bash` tools are enabled without an approval prompt in this mode, so no "dangerously skip permissions" equivalent is needed. `pi` writes into the process working directory, so files land in the run workspace with no `--add-dir` equivalent required.
 
 ### model-compare — same CLI, different models
 
@@ -307,6 +408,7 @@ agent-cost-bench model-compare list-tasks config.model-compare.example.yaml  # s
 agent-cost-bench report results/<run_id>.json                                # rebuild HTML
 agent-cost-bench new-task my-task                                            # scaffold (rubric)
 agent-cost-bench new-task my-task --with-tests                               # scaffold (pytest)
+agent-cost-bench import-tasks --type terminal-bench --path ~/tb/tasks        # import external tasks
 ```
 
 Reports (HTML + JSON) are written to `results/` and open automatically.
@@ -346,6 +448,8 @@ Tasks live under `tasks/`. Two types:
 Select tasks with `task_ids:` in your config. Omit it to run everything.
 
 > Rubric-graded tasks need `judge_model`. Docker tasks need Docker + prebuilt images.
+>
+> You can also bring in Terminal-Bench tasks as extra comparison tasks — see [Bring your own tasks](#bring-your-own-tasks-terminal-bench-21) below.
 > The seven high-complexity tasks (`event-sourcing-cqrs` through `platform-as-a-service`) are greenfield multi-file applications (7-16 files, 30-72 pytest scenarios each) that stress multi-file architecture and cross-cutting concerns; they take ~5-22 min per run versus under 2 min for the single-file tasks.
 
 ## How verification works
@@ -410,6 +514,144 @@ AGENT_COST_BENCH_RESULT: {"score": 0.7, "checkpoints": {...}, "summary": "..."}
 
 `functional_pass_threshold` in `task.yaml` sets the score needed for a PASS (default: 0.99). Lower it for rubric tasks that rarely need perfection.
 
+## Bring your own tasks (Terminal-Bench 2.1)
+
+Want more tasks to compare CLIs on than the ones bundled here? You can pull in tasks from
+[Terminal-Bench](https://github.com/harbor-framework/terminal-bench-2-1) and run your CLIs against them. The framework imports Terminal-Bench 2.x tasks (Harbor layout: `task.toml` +
+`instruction.md` + `environment/` + `tests/`; older 1.x layouts are handled too), converts each
+to a native fixture, and grades it with the task's **own** hidden test suite — giving you a pool
+of real, third-party tasks for the cost/quality comparison without authoring them yourself.
+
+> **This is "bring Terminal-Bench tasks into this framework," not "run the Terminal-Bench
+> benchmark."** The two harnesses execute differently, and that difference matters:
+>
+> - **Terminal-Bench** runs the agent *inside* the task's container, so the agent can install
+>   packages, build binaries, and start services that its tests then check.
+> - **This framework** runs each CLI on the *host* and copies only the files it produces (under
+>   `src/`) into a fresh container for grading. Anything the agent installs into its host
+>   environment does not reach the grading container.
+>
+> The practical consequence: tasks that only require the agent to **produce files** (transform
+> data, write a program, fix code) grade correctly and are great for comparing CLIs. Tasks that
+> require the agent to **mutate the container environment** (e.g. "install R", "build `pmars`
+> into `/usr/local/bin`", "run a web server") cannot be graded faithfully here — the framework
+> detects and skips those rather than scoring them as model failures. So treat Terminal-Bench
+> here as a *source of extra comparison tasks*, not as a way to reproduce Terminal-Bench scores.
+> If you need faithful Terminal-Bench leaderboard numbers, use Terminal-Bench's own harness.
+
+**Curated default.** Because a large share of the suite assumes in-container execution, a
+`terminal-bench` source with **no explicit `tasks:` filter** defaults to a small, curated set of
+tasks that have been confirmed to grade correctly under this host-agent model (rather than
+running all ~89 and reporting a wall of structural failures). Set `tasks:` explicitly to run any
+tasks you choose — the curated default only applies when you don't. The confirmed set lives in
+`agent_cost_bench/importers/terminal_bench.py` (`_TERMINAL_BENCH_SUPPORTED`) and grows as runs
+confirm more tasks are gradeable.
+
+**How grading is bridged.** The importer emits a Docker `verify:` block (`parser: reward-file`)
+that copies the model's `src/` into the task image, runs the task's own test script, and reads
+the reward it writes. The imported prompt instructs the model to place its solution under `src/`,
+and any input files the task references (e.g. `/app/data.txt`) are seeded into the workspace so
+the model can read them.
+
+### Option A — declare a task source in your config (imported at run time)
+
+Add a `task_sources:` list to either config schema. Tasks are converted the moment you run,
+staged under `<workspace_base>/.imported-tasks/`, and discovered like any other task.
+
+`path` can be a **local directory** or a **git URL**. When it is a git URL, the framework
+clones the repository into its own cache (`<workspace_base>/.repo_cache/`) on first use and
+imports from there — you don't have to download anything by hand:
+
+```yaml
+task_sources:
+  # Auto-cloned from GitHub — nothing to download first:
+  - type: terminal-bench
+    path: https://github.com/laude-institute/terminal-bench
+    ref: main                                 # branch, tag, or full 40-char commit SHA
+    subdir: tasks                             # repo subdirectory that holds the tasks
+    # tasks: [chess-best-move, write-compressor]  # optional: pick specific source task names.
+    #   Omit to use the curated harness-compatible default set (see above).
+    # token_env: GITHUB_TOKEN                 # for a PRIVATE repo over HTTPS (env var NAME)
+
+  # Or a local checkout (ref/subdir/depth/token_env are ignored for a local path):
+  - type: terminal-bench
+    path: ~/benchmarks/terminal-bench/tasks   # a task dir, or a directory of task dirs
+```
+
+Then run as usual — `agent-cost-bench cli-compare run config.yaml`. Imported ids are prefixed
+(`terminal-bench-<name>`), so you can still target them with `task_ids:` or `--task`.
+
+> **Task sources are exclusive.** When any enabled `task_sources` entry is present, the run uses
+> **only** the imported tasks — the repo's own `tasks/` tree is skipped — so an imported-task run
+> isn't diluted by the bundled sample tasks. Remove or disable the `task_sources` block
+> (`enabled: false`) to go back to running the local `tasks/`. `tasks_dir` is still read from the
+> config but ignored while a task source is active.
+>
+> With no `tasks:` filter, only the curated harness-compatible default set is imported (see the
+> "Curated default" note above). Set `tasks:` to override that and pick your own.
+
+#### Caveats for git task sources
+
+- **Verify the repo URL and `subdir`.** The framework imports whatever task directories it finds
+  under the cloned path; it does not validate that a given URL is the "official" benchmark. Point
+  `path` at the real repository and set `subdir` to the folder that actually holds the tasks
+  (Harbor layout). A wrong URL or `subdir` surfaces as "no tasks found," not as a download error.
+- **`git` must be installed and on `PATH`.** Cloning shells out to `git` (with a transport
+  allowlist and no interactive credential prompts). On Windows use [Git for Windows](https://git-scm.com/download/win).
+  This is the only external dependency the clone path needs.
+- **The clone is cached and not auto-refreshed.** Each URL + `ref` is cloned once into
+  `<workspace_base>/.repo_cache/<url_hash>/<ref>/` and reused on every later run — parallel runs
+  share a single fetch. It is **not** re-fetched automatically, so if `ref` is a moving branch
+  (e.g. `main`) that advances upstream, you keep getting the originally-cloned snapshot. Pin `ref`
+  to a full 40-char commit SHA for reproducibility. To force a fresh clone, delete the cache:
+  `rm -rf <workspace_base>/.repo_cache`.
+- **Windows filesystem notes.** The cache/clean-up logic is OS-agnostic and has been made
+  Windows-safe: publishing a freshly-cloned tree retries to ride out transient antivirus/indexer
+  file locks, and directory cleanup clears the read-only bit that git sets on objects under
+  `.git`. If a clone still fails to publish on Windows, an antivirus or search indexer is likely
+  holding a handle on the files — retry, or exclude your `workspace_base` directory from real-time
+  scanning. (These paths were validated by simulating the failure modes on POSIX; a real Windows
+  smoke test is the final confirmation.)
+
+### Option B — convert once into `tasks/` (inspect and edit the fixtures)
+
+```bash
+# Import every task from a directory of Terminal-Bench tasks
+agent-cost-bench import-tasks --type terminal-bench --path ~/terminal-bench/tasks
+
+# Import only named tasks
+agent-cost-bench import-tasks --type terminal-bench --path ~/tb/tasks \
+    --task hello-world --task fix-permissions
+
+# Import tasks into a custom root
+agent-cost-bench import-tasks --type terminal-bench --path ~/tb/tasks --into tasks
+
+# Import AND build the Docker images now (otherwise they build on first run)
+agent-cost-bench import-tasks --type terminal-bench --path ~/tb/tasks --build
+```
+
+Each import writes a native `tasks/<mode>/<id>/` fixture (a `task.yaml` plus the copied
+`verify/tests/`, the task's `environment/` build context, and the oracle solution under
+`reference/`). Tasks that ship a Dockerfile get their image built automatically on first
+run (see the Docker image note below).
+
+> **Docker image.** These tasks are graded in the source benchmark's own container. When the
+> source `task.toml`/manifest names a prebuilt `docker_image`, it is used as-is. When the task
+> ships only a `Dockerfile`, the importer copies its build context to `verify/environment/` and
+> records `verify.build_context` in the generated `task.yaml`. **The framework builds the image
+> automatically** the first time the task runs (and reuses it on later runs) — no manual build
+> step. You can also build eagerly at import time with `import-tasks --build`, or build it
+> yourself. If a build fails or the daemon is down, that task is reported as a harness error
+> (not a model failure) and the others still run.
+
+### Reward parsing
+
+Imported tasks score with the `reward-file` parser, which reads the reward the task's verifier
+writes (Harbor's convention is `/logs/verifier/reward.txt`). It accepts a float in `[0, 1]`
+(graduated reward), an integer `passed total` / `passed/total` pair, a binary `1`/`0`, or a
+small `{"reward": ...}` / `{"passed": .., "total": ..}` JSON object. If a task exits without
+writing a reward, the runner synthesizes one from the exit code.
+
 ## Supported CLIs and cost detection
 
 | Binary name | What it reads |
@@ -421,6 +663,7 @@ AGENT_COST_BENCH_RESULT: {"score": 0.7, "checkpoints": {...}, "summary": "..."}
 | `cursor` / `agent` | `-p --output-format json` → `usage` object with token counts |
 | `agy` / `antigravity` | `-p --output-format json` → `usage` object with token counts |
 | `devin` | `--export <file>` ATIF conversation export → `final_metrics` token counts |
+| `pi` | `-p --mode json` JSONL → `turn_end` `usage.cost.total` (USD, summed over turns) |
 | Any + per-token pricing | Custom regex with `(?P<input>...)` / `(?P<output>...)` groups |
 
 

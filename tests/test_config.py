@@ -123,6 +123,114 @@ def test_task_id_filter(tmp_path, monkeypatch):
     assert ids == {"t-spec"}
 
 
+def _make_tb_source(root):
+    """A minimal Terminal-Bench 2.x task tree usable as a task_sources path."""
+    d = root / "tb" / "hello"
+    (d / "tests").mkdir(parents=True)
+    (d / "task.toml").write_text('version = "1.0"\n[environment]\ndocker_image = "ubuntu:22.04"\n')
+    (d / "instruction.md").write_text("# Hello\n\nPrint hello.\n")
+    (d / "tests" / "test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
+    return str(root / "tb")
+
+
+def test_task_sources_imported_and_discovered(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    tasks_dir = _make_tasks(tmp_path)
+    tb_dir = _make_tb_source(tmp_path)
+    cfg_path = _write(
+        tmp_path / "cli.yaml",
+        f"""
+        runners:
+          - name: kiro
+            cli_path: kiro
+            model_id: claude-sonnet-4
+        tasks_dir: {tasks_dir}
+        workspace_base: {tmp_path / "ws"}
+        task_sources:
+          - type: terminal-bench
+            path: {tb_dir}
+            tasks: [hello]
+        """,
+    )
+    cfg = load_cli_compare_config(cfg_path)
+    assert len(cfg.task_sources) == 1
+    assert cfg.task_sources[0].type == "terminal-bench"
+
+    tasks = {t.id: t for t in discover_tasks(cfg)}
+    # task_sources are exclusive: only the imported Terminal-Bench task runs;
+    # the repo's own tasks_dir tasks (e.g. 't-vibe') are skipped.
+    assert "terminal-bench-hello" in tasks
+    assert "t-vibe" not in tasks
+    imported = tasks["terminal-bench-hello"]
+    assert imported.verify is not None
+    assert imported.verify.parser == "reward-file"
+    assert imported.verify.image == "ubuntu:22.04"
+
+
+def test_task_sources_name_filter(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    tasks_dir = _make_tasks(tmp_path)
+    tb_dir = _make_tb_source(tmp_path)
+    cfg_path = _write(
+        tmp_path / "cli.yaml",
+        f"""
+        runners:
+          - name: kiro
+            cli_path: kiro
+            model_id: claude-sonnet-4
+        tasks_dir: {tasks_dir}
+        workspace_base: {tmp_path / "ws"}
+        task_sources:
+          - type: terminal-bench
+            path: {tb_dir}
+            tasks: [hello]
+        """,
+    )
+    cfg = load_cli_compare_config(cfg_path)
+    ids = {t.id for t in discover_tasks(cfg)}
+    assert "terminal-bench-hello" in ids
+
+
+def _make_named_tb_task(root, name):
+    d = root / "tb" / name
+    (d / "tests").mkdir(parents=True)
+    (d / "task.toml").write_text('version = "1.0"\n[environment]\ndocker_image = "ubuntu:22.04"\n')
+    (d / "instruction.md").write_text(f"# {name}\n\nDo it.\n")
+    (d / "tests" / "test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
+
+
+def test_terminal_bench_defaults_to_supported_allowlist(tmp_path, monkeypatch):
+    """With no explicit tasks:, a terminal-bench source imports only the built-in
+    harness-compatible allowlist — not every task in the source."""
+    from agent_cost_bench.importers.terminal_bench import terminal_bench_supported_tasks
+
+    monkeypatch.chdir(tmp_path)
+    tasks_dir = _make_tasks(tmp_path)
+    allow = terminal_bench_supported_tasks()
+    # One allowlisted task + one that is NOT on the allowlist.
+    _make_named_tb_task(tmp_path, allow[0])
+    _make_named_tb_task(tmp_path, "some-unsupported-env-task")
+
+    cfg_path = _write(
+        tmp_path / "cli.yaml",
+        f"""
+        runners:
+          - name: kiro
+            cli_path: kiro
+            model_id: claude-sonnet-4
+        tasks_dir: {tasks_dir}
+        workspace_base: {tmp_path / "ws"}
+        task_sources:
+          - type: terminal-bench
+            path: {tmp_path / "tb"}
+        """,
+    )
+    cfg = load_cli_compare_config(cfg_path)
+    ids = {t.id for t in discover_tasks(cfg)}
+    assert f"terminal-bench-{allow[0]}" in ids
+    assert "terminal-bench-some-unsupported-env-task" not in ids
+
+
 def test_effort_passthrough_both_schemas(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     tasks_dir = _make_tasks(tmp_path)
@@ -223,6 +331,13 @@ def test_cost_source_inferred_from_binary_name(tmp_path, monkeypatch):
         ("devin",         {"usd_per_input_token": 0.000005,
                            "usd_per_output_token": 0.000025},  CostSource.DEVIN_EXPORT),
         ("devin",         {},                                   CostSource.DEVIN_EXPORT),
+        ("pi",            {},                                   CostSource.PI_JSON),
+        ("/opt/homebrew/bin/pi", {},                            CostSource.PI_JSON),
+        # pi reports USD itself; optional token rates must not demote it to TOKENS
+        ("pi",            {"usd_per_input_token": 0.000002,
+                           "usd_per_output_token": 0.00001},    CostSource.PI_JSON),
+        # a longer name merely ENDING in "pi" is not the pi CLI
+        ("copi",          {},                                   CostSource.NONE),
         ("my-cli",        {"usd_per_input_token": 0.000001,
                            "usd_per_output_token": 0.000004},  CostSource.TOKENS),
         ("my-cli",        {"usd_per_premium_request": 0.04},   CostSource.PREMIUM_REQUEST),
@@ -286,6 +401,10 @@ def test_cli_compare_config_no_cost_source_in_yaml(tmp_path, monkeypatch):
               usd_per_output_token: 0.000025
             cli_base_args: ["-p", "{{prompt}}", "--model", "{{model}}",
                             "--export", "devin-usage.json"]
+          - name: pi
+            cli_path: pi
+            model_id: global.anthropic.claude-sonnet-5
+            cli_base_args: ["-p", "--mode", "json", "--model", "{{model}}", "{{prompt}}"]
         tasks_dir: {tasks_dir}
         """,
     )
@@ -296,3 +415,4 @@ def test_cli_compare_config_no_cost_source_in_yaml(tmp_path, monkeypatch):
     assert by_name["copilot"].cost_source == CostSource.COPILOT_JSON
     assert by_name["codex"].cost_source == CostSource.CODEX_JSON
     assert by_name["devin"].cost_source == CostSource.DEVIN_EXPORT
+    assert by_name["pi"].cost_source == CostSource.PI_JSON

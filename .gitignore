@@ -3,6 +3,10 @@ results/
 *.partial.json
 .repo_cache/
 
+# --- run.sh interactive runner: per-run clones/venvs + cached keys, and local reports ---
+.agent-cost-bench/
+acb-results/
+
 # --- local config that may hold API keys (commit only the *.example.yaml) ---
 config.yaml
 config.*.yaml

@@ -98,6 +98,21 @@ class BenchmarkRunner:
             raise
 
         self._cleanup_old_workspaces()
+        # Drop tasks we cannot grade under the host-agent model (their tests need
+        # a runtime nothing provides — the agent was expected to install it
+        # in-container). Detection is static (reads test files + the env
+        # Dockerfile), so it runs BEFORE image pulling — we never pull an image
+        # for a task we're going to skip. Skipping keeps the pass rate honest:
+        # these are a harness limitation, not a model failure.
+        tasks = self._filter_unsupported_runtime_tasks(tasks)
+        if not tasks:
+            console.print(
+                "[yellow]No runnable tasks remain after skipping runtime-incompatible "
+                "tasks. Nothing to do.[/yellow]"
+            )
+            self._logger.close()
+            return BenchmarkRun(run_id=self.run_id, config=self.config)
+
         self._docker_preflight(tasks)
         self._repo_preflight(tasks)
 
@@ -232,11 +247,106 @@ class BenchmarkRunner:
                     f"Available: {', '.join(valid) or 'none queried'}."
                 )
 
+    def _ensure_images(self, tasks) -> None:
+        """Make each task's missing verification image available, automatically.
+
+        Two kinds of image show up on imported tasks:
+
+        * **Buildable** — the task ships a Dockerfile and carries
+          ``verify.build_context``. The image is built on demand from that
+          context (:func:`ensure_image`).
+        * **Prebuilt / externally hosted** — the task references a published
+          image by name with NO build context (e.g. Terminal-Bench's
+          ``alexgshaw/<task>:<date>``). The image is pulled from its registry
+          (:func:`ensure_image_pulled`).
+
+        Both are best-effort: failures are warned and the task then falls
+        through to the normal missing-image harness-error path rather than
+        crashing the run. Each image is handled once even if several tasks share
+        it."""
+        from .verify.docker_build import ensure_image, ensure_image_pulled
+
+        seen: set[str] = set()
+        for t in tasks:
+            spec = getattr(t, "verify", None)
+            if spec is None or not getattr(spec, "image", None):
+                continue
+            if spec.image in seen:
+                continue
+            seen.add(spec.image)
+
+            build_ctx = getattr(spec, "build_context", None)
+            if build_ctx and t.task_dir is not None:
+                # Buildable image: build from the task's Dockerfile context.
+                context = (Path(t.task_dir) / build_ctx).resolve()
+                console.print(f"[dim]Ensuring verification image {spec.image} (build) …[/dim]")
+                result = ensure_image(
+                    spec.image, context,
+                    timeout_seconds=1800,
+                    log=lambda m: console.print(f"[dim]  {m}[/dim]"),
+                )
+                verb = "Built"
+            else:
+                # Prebuilt image with no local context: pull it from the registry.
+                console.print(f"[dim]Ensuring verification image {spec.image} (pull) …[/dim]")
+                result = ensure_image_pulled(
+                    spec.image,
+                    timeout_seconds=1800,
+                    log=lambda m: console.print(f"[dim]  {m}[/dim]"),
+                )
+                verb = "Pulled"
+
+            if result.ok and result.built:
+                console.print(f"[green]✓[/green] {verb} verification image {spec.image}")
+            elif not result.ok:
+                console.print(
+                    f"[yellow]⚠ Could not obtain image {spec.image} for task "
+                    f"'{t.id}':[/yellow] {result.detail}"
+                )
+
+    def _image_remediation(self, tasks, missing_images) -> str:
+        """Build a per-image remediation hint for images that are still missing.
+
+        Distinguishes the three cases so the advice is actionable instead of
+        blanket-suggesting the bundled ``build-images.sh`` (which only knows the
+        repo's own ``agent-cost-bench-*`` language images):
+          * bundled image  → run ./tasks/docker/build-images.sh
+          * buildable task  → shipped a Dockerfile but the build failed; see log
+          * prebuilt image  → docker pull <image> (or check the name/registry)"""
+        # Map image -> whether the owning task ships a build context.
+        buildable: dict[str, bool] = {}
+        for t in tasks:
+            spec = getattr(t, "verify", None)
+            img = getattr(spec, "image", None) if spec else None
+            if img in missing_images:
+                buildable[img] = bool(getattr(spec, "build_context", None))
+
+        from .verify.docker_env import get_runtime
+
+        runtime = get_runtime()
+        lines: list[str] = []
+        for img in missing_images:
+            if img.startswith("agent-cost-bench-"):
+                lines.append(f"    {img}: build the bundled images → ./tasks/docker/build-images.sh")
+            elif buildable.get(img):
+                lines.append(f"    {img}: ships a Dockerfile but the build failed — see the log above")
+            else:
+                lines.append(f"    {img}: pull it → {runtime} pull {img} (verify the name/registry)")
+        return "\n" + "\n".join(lines) if lines else ""
+
     def _docker_preflight(self, tasks) -> None:
         """Non-fatal up-front check for Docker-verified tasks: confirm the daemon
         is up and the required images are present locally. Missing pieces are
         WARNED (those tasks will be reported as harness errors, not model
-        failures) — non-Docker tasks still run."""
+        failures) — non-Docker tasks still run.
+
+        Missing verification images are obtained automatically before this
+        check: tasks that ship a Dockerfile (``verify.build_context``) are built,
+        and tasks that reference a prebuilt externally-hosted image are pulled
+        from their registry (e.g. imported Terminal-Bench tasks). Only images
+        that could not be built or pulled are warned about here."""
+        self._ensure_images(tasks)
+
         rep = docker_report(tasks)
         if not rep["needs_docker"]:
             return
@@ -246,14 +356,19 @@ class BenchmarkRunner:
                 f"[yellow]⚠ {rep['tasks_blocked']} task(s) need Docker but the daemon "
                 f"isn't reachable.[/yellow] They will be skipped as harness errors.\n"
                 f"  Needed images: {imgs}\n"
-                f"  Start Docker, then build images: ./tasks/docker/build-images.sh"
+                f"  Start Docker, then re-run."
             )
         elif rep["missing_images"]:
             missing = ", ".join(rep["missing_images"])
+            # By this point the framework already tried to build/pull each image
+            # and failed, so point at the concrete remediation per image rather
+            # than blanket-suggesting the repo's own build-images.sh (which only
+            # builds the bundled language images, never external task images).
+            hint = self._image_remediation(tasks, rep["missing_images"])
             console.print(
-                f"[yellow]⚠ Docker is up but these images are missing:[/yellow] {missing}\n"
-                f"  {rep['tasks_blocked']} task(s) can't verify until you run: "
-                f"./tasks/docker/build-images.sh"
+                f"[yellow]⚠ Docker is up but these images are still missing after "
+                f"an auto build/pull:[/yellow] {missing}\n"
+                f"  {rep['tasks_blocked']} task(s) can't verify.{hint}"
             )
             # Show what this (subprocess) Docker actually sees — usually a
             # context mismatch between the shell and the harness.
@@ -264,6 +379,32 @@ class BenchmarkRunner:
                 pass
         else:
             console.print(f"[dim]Docker OK — verification images present: {imgs}[/dim]")
+
+    def _filter_unsupported_runtime_tasks(self, tasks):
+        """Return tasks minus any whose verifier needs a runtime absent from the
+        task image (a host-agent-model limitation — see preflight docs).
+
+        These are SKIPPED entirely rather than run and scored 0: the model can't
+        install a runtime into the grading container from the host, so counting
+        them as failures would misrepresent the model. Each skip is warned with
+        the specific missing runtime so it's transparent, not silent."""
+        from .preflight import unsupported_runtime_report
+
+        report = unsupported_runtime_report(tasks)
+        if not report:
+            return tasks
+
+        for tid, info in report.items():
+            missing = ", ".join(f"{lbl} (`{b}`)" for b, lbl in info["missing"])
+            console.print(
+                f"[yellow]⚠ Skipping '{tid}':[/yellow] its tests need {missing}, "
+                f"which is not in the task image ({info['image']}) and can't be "
+                f"installed into the grading container from the host. This is a "
+                f"harness limitation, not a model failure — excluding it so the "
+                f"pass rate stays honest."
+            )
+        skipped = set(report.keys())
+        return [t for t in tasks if t.id not in skipped]
 
     def _repo_preflight(self, tasks) -> None:
         """Non-fatal up-front check for repo-based tasks."""

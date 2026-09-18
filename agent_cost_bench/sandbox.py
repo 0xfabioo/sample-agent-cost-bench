@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from .models import BenchConfig, RepoSpec, TaskConfig
@@ -44,6 +45,84 @@ _ALLOWED_GIT_PROTOCOLS = "https:http:ssh:git"
 def _safe_ref(ref: str) -> str:
     """Filesystem-safe version of a git ref (branch / tag / SHA)."""
     return re.sub(r"[^a-zA-Z0-9._-]", "_", ref)[:64]
+
+
+def _on_rm_error(func, path, exc_info) -> None:
+    """rmtree error handler: clear the read-only bit and retry once.
+
+    Git marks objects under ``.git`` read-only; on Windows ``shutil.rmtree``
+    (and even ``os.remove``) refuses to delete a read-only file, so wiping a
+    cloned tree fails without this. On POSIX the parent dir's write bit governs
+    deletion so this is rarely hit, but the handler is harmless there too.
+    """
+    import stat
+
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
+def robust_rmtree(path: Path) -> None:
+    """Cross-platform recursive delete that tolerates read-only git files.
+
+    Uses the ``onexc`` handler on Python 3.12+ and falls back to the deprecated
+    ``onerror`` on older interpreters (same callable signature works for both in
+    practice via a thin adapter)."""
+    if not Path(path).exists():
+        return
+    try:
+        # Python 3.12+: onexc(func, path, exc)
+        shutil.rmtree(path, onexc=lambda f, p, e: _on_rm_error(f, p, None))
+    except TypeError:
+        # Python <3.12: onerror(func, path, exc_info)
+        shutil.rmtree(path, onerror=_on_rm_error)
+
+
+def _publish_cache_dir(tmp: Path, cache_dir: Path) -> None:
+    """Atomically publish a freshly-populated ``tmp`` dir as ``cache_dir``.
+
+    Written to be OS-agnostic. On POSIX ``rename`` is atomic and fails when the
+    destination already exists; on Windows ``rename`` can also fail transiently
+    with ``PermissionError``/``OSError`` (WinError 5/32) when antivirus or an
+    indexer briefly holds a handle on the just-cloned tree. We therefore:
+
+    * treat "``cache_dir`` already exists" as success (a parallel run won the
+      race) and drop our ``tmp`` copy, and
+    * retry the rename a few times with a short backoff to ride out transient
+      Windows locks before giving up.
+
+    The previous implementation caught every ``OSError`` and silently deleted
+    ``tmp`` — on Windows that turned a transient lock into a *missing* cache,
+    surfacing later as a confusing "cache not found" error.
+    """
+    last_err: OSError | None = None
+    for attempt in range(5):
+        # Someone else finished the clone while we were working — use theirs.
+        if cache_dir.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+            return
+        try:
+            os.replace(tmp, cache_dir)
+            return
+        except OSError as e:
+            # A parallel run may have created cache_dir between our check and the
+            # replace; re-check at the top of the loop. Otherwise this is likely
+            # a transient Windows AV/indexer lock — back off and retry.
+            last_err = e
+            time.sleep(0.2 * (attempt + 1))
+
+    # Final race check before falling back.
+    if cache_dir.exists():
+        shutil.rmtree(tmp, ignore_errors=True)
+        return
+    raise RuntimeError(
+        f"Could not publish repo cache to {cache_dir}: {last_err}. "
+        "If this is Windows, an antivirus/indexer may be locking the cloned "
+        "files; retry, or exclude the workspace_base directory from real-time "
+        "scanning."
+    )
 
 
 def _git_base_env() -> dict[str, str]:
@@ -129,7 +208,9 @@ def _clone_to_cache(repo: RepoSpec, cache_dir: Path) -> None:
     * subdir       → git sparse-checkout after clone to limit disk use
     """
     cache_dir.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache_dir.with_suffix(".tmp")
+    # Append (don't use with_suffix) so a ref containing a dot (e.g. "v1.0")
+    # isn't mangled — with_suffix("v1.0", ".tmp") would yield "v1.tmp".
+    tmp = cache_dir.parent / (cache_dir.name + ".tmp")
     if tmp.exists():
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -161,12 +242,10 @@ def _clone_to_cache(repo: RepoSpec, cache_dir: Path) -> None:
         if repo.subdir:
             _run_git("-C", str(tmp), "sparse-checkout", "set", repo.subdir, env=base_env)
 
-        # Atomic move: tmp → cache_dir
-        try:
-            tmp.rename(cache_dir)
-        except (FileExistsError, OSError):
-            # Another parallel run already completed the cache — that's fine.
-            shutil.rmtree(tmp, ignore_errors=True)
+        # Publish tmp → cache_dir (atomic on POSIX; retry-with-backoff on
+        # Windows to ride out transient AV/indexer locks). Handles the parallel
+        # "someone else won the race" case as success.
+        _publish_cache_dir(tmp, cache_dir)
 
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -339,6 +418,22 @@ class Workspace:
             capture_output=True,
             timeout=30,
         )
+        # Seed imported task INPUT files (Terminal-Bench tasks reference inputs by
+        # absolute /app paths that don't exist on the host). The importer places
+        # them under inputs/; copy them into the workspace ROOT so the model can
+        # read them directly at its cwd, matching the imported prompt's note.
+        #
+        # Deliberately NOT copied into src/: the grading container already carries
+        # the authoritative inputs at /app (baked into the image), and src/ is
+        # copied over /app at verify time. Seeding into src/ would let a
+        # model-modified input silently override the grader's real input. The
+        # model is told to put its SOLUTION under src/; inputs stay read-only at
+        # the workspace root.
+        inputs_dir = task_dir / "inputs"
+        if inputs_dir.is_dir():
+            for f in inputs_dir.iterdir():
+                if f.is_file():
+                    shutil.copy2(f, self._base / f.name)
 
     def teardown(self, keep: bool = False) -> None:
         """Kept after a run for inspection; cleaned at the start of the next run."""
